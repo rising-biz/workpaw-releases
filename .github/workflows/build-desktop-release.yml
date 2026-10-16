@@ -208,6 +208,7 @@ jobs:
 
       - name: Confirm checked-out source revision
         working-directory: source
+        shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
