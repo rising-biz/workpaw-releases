@@ -372,9 +372,9 @@ jobs:
               if ($currentUrl | startswith($prefix)) then
                 .
               else
-                ($uploaded | map(select(.apiUrl == $currentUrl)) | .[0].url) as $publicUrl |
-                if (($publicUrl | type) == "string") and ($publicUrl | startswith($prefix)) then
-                  .value.url = $publicUrl
+                ($uploaded | map(select(.apiUrl == $currentUrl)) | .[0].name) as $assetName |
+                if (($assetName | type) == "string") and ($assetName != "") then
+                  .value.url = ($prefix + ($assetName | @uri))
                 else
                   error("manifest URL is not a release-owned public download: " + $currentUrl)
                 end
@@ -406,7 +406,8 @@ jobs:
           ' "$manifest" >/dev/null
           gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets \
             --jq '[.assets[] | {apiUrl, name, url}]' > release-assets/assets.json
-          jq -e --slurpfile assets release-assets/assets.json '
+          jq -e --arg downloadPrefix "https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/" \
+            --slurpfile assets release-assets/assets.json '
             ($assets[0] // []) as $uploaded |
             [.platforms[].url] as $requiredUrls |
             ($uploaded | any(.name | endswith(".exe"))) and
@@ -414,12 +415,9 @@ jobs:
             all(
               $requiredUrls[];
               . as $requiredUrl |
-              ($uploaded | any(.url == $requiredUrl))
+              ($uploaded | any(($downloadPrefix + (.name | @uri)) == $requiredUrl))
             )
           ' "$manifest" >/dev/null
-          jq -r '.platforms[].url' "$manifest" | sort -u | while IFS= read -r url; do
-            curl --fail --location --silent --show-error --head --retry 3 "$url" >/dev/null
-          done
           echo "Public updater manifest is valid:"
           jq '{version, platforms: (.platforms | keys)}' "$manifest"
 
@@ -442,3 +440,35 @@ jobs:
           fi
           gh release edit "$RELEASE_TAG" "${args[@]}"
           echo "Published $RELEASE_REPOSITORY@$RELEASE_TAG"
+
+  verify-public-release:
+    name: Confirm public updater downloads
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ inputs.desktop_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Confirm manifest URLs resolve without GitHub API credentials
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$RELEASE_REPOSITORY" \
+            --pattern latest.json \
+            --dir release-assets
+          manifest=release-assets/latest.json
+          public_prefix="https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/"
+          jq -e --arg version "${RELEASE_TAG#v}" --arg prefix "$public_prefix" '
+            .version == $version and
+            (.platforms | has("darwin-aarch64")) and
+            (.platforms | has("darwin-x86_64")) and
+            (.platforms | has("windows-x86_64")) and
+            ([.platforms[] | select((.signature // "") == "")] | length == 0) and
+            ([.platforms[].url | startswith($prefix)] | all)
+          ' "$manifest" >/dev/null
+          jq -r '.platforms[].url' "$manifest" | sort -u | while IFS= read -r url; do
+            curl --fail --location --silent --show-error --head --retry 3 "$url" >/dev/null
+          done
+          echo "Confirmed anonymous public updater downloads for $RELEASE_TAG."
