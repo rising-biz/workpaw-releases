@@ -18,7 +18,15 @@ WorkPaw Desktop 的公开制品分发与自动构建编排仓库。
 https://github.com/rising-biz/workpaw-releases/releases/latest/download/latest.json
 ```
 
-## 自动 macOS 发布
+`latest.json` 中每个制品 URL 必须是同一 Release 的公开静态下载地址：
+
+```text
+https://github.com/rising-biz/workpaw-releases/releases/download/<tag>/<asset-name>
+```
+
+禁止写入 GitHub REST API 制品地址。客户端更新请求不携带 GitHub API 令牌或 API 媒体类型，REST 制品地址会返回 `403 Forbidden`。
+
+## 自动桌面客户端发布
 
 `.github/workflows/build-desktop-release.yml` 是唯一的桌面构建入口。它只能从本仓库的 `main` 手动触发，触发后无需人工审批，并固定构建以下原生目标：
 

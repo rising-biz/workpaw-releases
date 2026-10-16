@@ -358,12 +358,40 @@ jobs:
             --pattern latest.json \
             --dir release-assets
 
+      - name: Normalize updater URLs to public release downloads
+        run: |
+          set -euo pipefail
+          manifest=release-assets/latest.json
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets \
+            --jq '[.assets[] | {apiUrl, name, url}]' > release-assets/assets.json
+          public_prefix="https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/"
+          jq -e --arg prefix "$public_prefix" --slurpfile assets release-assets/assets.json '
+            ($assets[0] // []) as $uploaded |
+            .platforms |= with_entries(
+              .value.url as $currentUrl |
+              if ($currentUrl | startswith($prefix)) then
+                .
+              else
+                ($uploaded | map(select(.apiUrl == $currentUrl)) | .[0].url) as $publicUrl |
+                if (($publicUrl | type) == "string") and ($publicUrl | startswith($prefix)) then
+                  .value.url = $publicUrl
+                else
+                  error("manifest URL is not a release-owned public download: " + $currentUrl)
+                end
+              end
+            )
+          ' "$manifest" > "$manifest.normalized"
+          mv "$manifest.normalized" "$manifest"
+          gh release upload "$RELEASE_TAG" "$manifest#latest.json" \
+            --repo "$RELEASE_REPOSITORY" --clobber
+
       - name: Validate manifest and uploaded public assets
         run: |
           set -euo pipefail
           manifest=release-assets/latest.json
           jq empty "$manifest"
-          jq -e --arg version "${RELEASE_TAG#v}" --arg repo "$RELEASE_REPOSITORY" --arg tag "$RELEASE_TAG" '
+          jq -e --arg version "${RELEASE_TAG#v}" \
+            --arg downloadPrefix "https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/" '
             .version == $version and
             (.platforms | type == "object") and
             (.platforms | has("darwin-aarch64")) and
@@ -372,8 +400,7 @@ jobs:
             ([.platforms[] | select((.signature // "") == "")] | length == 0) and
             ([.platforms[] | select(
               (.url // "") |
-              (startswith("https://api.github.com/repos/" + $repo + "/releases/assets/") or
-                startswith("https://github.com/" + $repo + "/releases/download/" + $tag + "/")) |
+              startswith($downloadPrefix) |
               not
             )] | length == 0)
           ' "$manifest" >/dev/null
@@ -387,9 +414,12 @@ jobs:
             all(
               $requiredUrls[];
               . as $requiredUrl |
-              ($uploaded | any(.apiUrl == $requiredUrl or .url == $requiredUrl))
+              ($uploaded | any(.url == $requiredUrl))
             )
           ' "$manifest" >/dev/null
+          jq -r '.platforms[].url' "$manifest" | sort -u | while IFS= read -r url; do
+            curl --fail --location --silent --show-error --head --retry 3 "$url" >/dev/null
+          done
           echo "Public updater manifest is valid:"
           jq '{version, platforms: (.platforms | keys)}' "$manifest"
 
