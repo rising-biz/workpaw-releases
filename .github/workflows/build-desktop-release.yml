@@ -1,0 +1,402 @@
+name: Build WorkPaw Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      desktop_tag:
+        description: 'Private WorkPaw Desktop annotated tag, for example v0.0.16'
+        required: true
+        type: string
+
+concurrency:
+  group: public-desktop-release-${{ inputs.desktop_tag }}
+  cancel-in-progress: false
+
+# This token can write releases only in this public artifact repository. Private
+# source access and signing material are Environment secrets, never repository
+# secrets and never exposed to pull-request or push-triggered workflows.
+permissions:
+  contents: write
+
+env:
+  RELEASE_REPOSITORY: rising-biz/workpaw-releases
+  SOURCE_REPOSITORY: rising-biz/workpaw-desktop
+  WORKPAW_UI_REPOSITORY: https://github.com/rising-biz/workpaw-ui.git
+  WORKPAW_UI_REF: ac490306bda0e06144895886b3e9a83dc155fe6b # reviewed workpaw-ui commit
+
+jobs:
+  preflight:
+    name: Validate private source release
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: desktop-release
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      is_prerelease: ${{ steps.release-input.outputs.is_prerelease }}
+    env:
+      RELEASE_TAG: ${{ inputs.desktop_tag }}
+    steps:
+      - name: Validate source tag and required release secrets
+        id: release-input
+        env:
+          WORKPAW_DESKTOP_READ_TOKEN: ${{ secrets.WORKPAW_DESKTOP_READ_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Desktop tag must match vMAJOR.MINOR.PATCH[-prerelease], received: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          for name in WORKPAW_DESKTOP_READ_TOKEN TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required desktop-release Environment secret: $name" >&2
+              exit 1
+            fi
+          done
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out private Desktop source tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-desktop
+          ref: refs/tags/${{ inputs.desktop_tag }}
+          token: ${{ secrets.WORKPAW_DESKTOP_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+
+      - name: Resolve and verify immutable source revision
+        id: source
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test -n "$(git rev-parse --verify refs/remotes/origin/main)"
+          tag_object="$(git rev-parse "refs/tags/$RELEASE_TAG")"
+          if [[ "$(git cat-file -t "$tag_object")" != "tag" ]]; then
+            echo "Desktop release tag must be annotated: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          source_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{}")"
+          if ! git merge-base --is-ancestor "$source_sha" origin/main; then
+            echo "Desktop release tag $RELEASE_TAG is not reachable from source main." >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse HEAD)" != "$source_sha" ]]; then
+            echo "Checked-out Desktop source does not match the resolved release tag." >&2
+            exit 1
+          fi
+          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          echo "Validated $RELEASE_TAG at $source_sha"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: source/.node-version
+
+      - name: Validate Desktop release contract
+        working-directory: source
+        run: |
+          set -euo pipefail
+          node scripts/check-release-version.mjs "$RELEASE_TAG"
+          node scripts/check-production-environment.mjs
+          node scripts/check-release-distribution.mjs
+
+  prepare-release:
+    name: Prepare public draft release
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+    env:
+      RELEASE_TAG: ${{ inputs.desktop_tag }}
+      IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Create or reuse an idempotent draft release
+        id: release
+        run: |
+          set -euo pipefail
+          if release_json="$(gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json databaseId,isDraft,body 2>/dev/null)"; then
+            if [[ "$(jq -r '.isDraft' <<<"$release_json")" != "true" ]]; then
+              echo "Release $RELEASE_TAG is already published; refusing to overwrite it." >&2
+              exit 1
+            fi
+            expected_body="WorkPaw Desktop macOS release from private source commit $SOURCE_SHA."
+            if [[ "$(jq -r '.body' <<<"$release_json")" != "$expected_body" ]]; then
+              echo "Draft release $RELEASE_TAG belongs to a different source revision; refusing to mix artifacts." >&2
+              exit 1
+            fi
+            release_id="$(jq -r '.databaseId' <<<"$release_json")"
+            echo "Reusing draft release $RELEASE_TAG (id $release_id)."
+          else
+            args=(
+              --repo "$RELEASE_REPOSITORY"
+              --target main
+              --draft
+              --title "WorkPaw Desktop $RELEASE_TAG"
+              --notes "WorkPaw Desktop macOS release from private source commit $SOURCE_SHA."
+            )
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              args+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" "${args[@]}"
+            release_id="$(gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json databaseId --jq '.databaseId')"
+            echo "Created draft release $RELEASE_TAG (id $release_id)."
+          fi
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [preflight, prepare-release]
+    strategy:
+      fail-fast: false
+      # Tauri merges latest.json into the release. Keep writes serial so one
+      # native target cannot overwrite the other target's updater entry.
+      max-parallel: 1
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    environment:
+      name: desktop-release
+    env:
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      RELEASE_TAG: ${{ inputs.desktop_tag }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+      APPLE_API_KEY_PATH: ${{ github.workspace }}/source/AuthKey.p8
+    steps:
+      - name: Check out verified private Desktop source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-desktop
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          token: ${{ secrets.WORKPAW_DESKTOP_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: source
+
+      - name: Confirm checked-out source revision
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Validate optional Apple signing credentials
+        run: |
+          set -euo pipefail
+          apple_names=(
+            APPLE_CERTIFICATE
+            APPLE_CERTIFICATE_PASSWORD
+            APPLE_SIGNING_IDENTITY
+            KEYCHAIN_PASSWORD
+          )
+          configured=0
+          for name in "${apple_names[@]}"; do
+            if [[ -n "${!name:-}" ]]; then
+              configured=1
+            fi
+          done
+          if [[ "$configured" == 0 ]]; then
+            echo "Apple certificate secrets are not configured; the release will be Tauri-updater-signed only."
+            exit 0
+          fi
+          for name in "${apple_names[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Incomplete Apple signing configuration: $name is missing." >&2
+              exit 1
+            fi
+          done
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.21.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: source/.node-version
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - name: Prepare shared workpaw-ui
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          shim_dir="$RUNNER_TEMP/workpaw-ui-pnpm"
+          mkdir -p "$shim_dir"
+          cat > "$shim_dir/pnpm" <<'SH'
+          #!/usr/bin/env bash
+          exec corepack pnpm@11.11.0 "$@"
+          SH
+          chmod +x "$shim_dir/pnpm"
+          GITHUB_WORKSPACE="$PWD" PATH="$shim_dir:$PATH" bash scripts/ci/setup-workpaw-ui.sh
+
+      - name: Install Desktop dependencies
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # Rust 1.97.1 (reviewed 2026-08-06)
+        with:
+          toolchain: 1.97.1
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: 'source/src-tauri -> target'
+          key: public-release-${{ matrix.target }}
+
+      - name: Import Apple Developer certificate
+        if: env.APPLE_CERTIFICATE != ''
+        working-directory: source
+        shell: bash
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+
+      - name: Prepare App Store Connect API key
+        if: env.APPLE_API_KEY_CONTENT != ''
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPLE_API_KEY_CONTENT" > "$APPLE_API_KEY_PATH"
+          chmod 600 "$APPLE_API_KEY_PATH"
+
+      - name: Build and upload updater-signed Tauri release assets
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NODE_OPTIONS: --max-old-space-size=8192
+        with:
+          releaseId: ${{ needs.prepare-release.outputs.release_id }}
+          tagName: ${{ inputs.desktop_tag }}
+          releaseName: WorkPaw Desktop ${{ inputs.desktop_tag }}
+          releaseBody: WorkPaw Desktop macOS release.
+          releaseDraft: true
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
+          releaseCommitish: main
+          owner: rising-biz
+          repo: workpaw-releases
+          projectPath: source
+          retryAttempts: 2
+          uploadUpdaterJson: true
+          tauriScript: node scripts/ci/tauri-build.cjs
+          args: --target ${{ matrix.target }}
+
+      - name: Remove temporary Apple signing material
+        if: always()
+        working-directory: source
+        shell: bash
+        run: |
+          security delete-keychain build.keychain 2>/dev/null || true
+          rm -f certificate.p12 "$APPLE_API_KEY_PATH"
+
+  verify-release:
+    name: Verify public updater manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ inputs.desktop_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download draft updater manifest
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$RELEASE_REPOSITORY" \
+            --pattern latest.json \
+            --dir release-assets
+
+      - name: Validate manifest and uploaded public assets
+        run: |
+          set -euo pipefail
+          manifest=release-assets/latest.json
+          jq empty "$manifest"
+          jq -e --arg version "${RELEASE_TAG#v}" --arg repo "$RELEASE_REPOSITORY" --arg tag "$RELEASE_TAG" '
+            .version == $version and
+            (.platforms | type == "object") and
+            (.platforms | has("darwin-aarch64")) and
+            (.platforms | has("darwin-x86_64")) and
+            ([.platforms[] | select((.signature // "") == "")] | length == 0) and
+            ([.platforms[] | select(
+              (.url // "") |
+              (startswith("https://api.github.com/repos/" + $repo + "/releases/assets/") or
+                startswith("https://github.com/" + $repo + "/releases/download/" + $tag + "/")) |
+              not
+            )] | length == 0)
+          ' "$manifest" >/dev/null
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets \
+            --jq '[.assets[] | {apiUrl, url}]' > release-assets/urls.json
+          jq -e --slurpfile assets release-assets/urls.json '
+            ($assets[0] // []) as $uploaded |
+            [.platforms[].url] as $requiredUrls |
+            all(
+              $requiredUrls[];
+              . as $requiredUrl |
+              ($uploaded | any(.apiUrl == $requiredUrl or .url == $requiredUrl))
+            )
+          ' "$manifest" >/dev/null
+          echo "Public updater manifest is valid:"
+          jq '{version, platforms: (.platforms | keys)}' "$manifest"
+
+  publish:
+    name: Publish verified public release
+    needs: [preflight, verify-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ inputs.desktop_tag }}
+      IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Publish verified draft release
+        run: |
+          set -euo pipefail
+          args=(--repo "$RELEASE_REPOSITORY" --draft=false)
+          if [[ "$IS_PRERELEASE" != "true" ]]; then
+            args+=(--latest)
+          fi
+          gh release edit "$RELEASE_TAG" "${args[@]}"
+          echo "Published $RELEASE_REPOSITORY@$RELEASE_TAG"
