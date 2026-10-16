@@ -130,7 +130,7 @@ jobs:
               echo "Release $RELEASE_TAG is already published; refusing to overwrite it." >&2
               exit 1
             fi
-            expected_body="WorkPaw Desktop macOS release from private source commit $SOURCE_SHA."
+            expected_body="WorkPaw Desktop release from private source commit $SOURCE_SHA."
             if [[ "$(jq -r '.body' <<<"$release_json")" != "$expected_body" ]]; then
               echo "Draft release $RELEASE_TAG belongs to a different source revision; refusing to mix artifacts." >&2
               exit 1
@@ -143,7 +143,7 @@ jobs:
               --target main
               --draft
               --title "WorkPaw Desktop $RELEASE_TAG"
-              --notes "WorkPaw Desktop macOS release from private source commit $SOURCE_SHA."
+              --notes "WorkPaw Desktop release from private source commit $SOURCE_SHA."
             )
             if [[ "$IS_PRERELEASE" == "true" ]]; then
               args+=(--prerelease)
@@ -167,9 +167,15 @@ jobs:
           - name: macOS Apple Silicon
             os: macos-15
             target: aarch64-apple-darwin
+            apple_signing: true
           - name: macOS Intel
             os: macos-15-intel
             target: x86_64-apple-darwin
+            apple_signing: true
+          - name: Windows x64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            apple_signing: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     environment:
@@ -179,15 +185,15 @@ jobs:
       RELEASE_TAG: ${{ inputs.desktop_tag }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+      APPLE_CERTIFICATE: ${{ matrix.apple_signing && secrets.APPLE_CERTIFICATE || '' }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ matrix.apple_signing && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+      APPLE_SIGNING_IDENTITY: ${{ matrix.apple_signing && secrets.APPLE_SIGNING_IDENTITY || '' }}
+      APPLE_ID: ${{ matrix.apple_signing && secrets.APPLE_ID || '' }}
+      APPLE_PASSWORD: ${{ matrix.apple_signing && secrets.APPLE_PASSWORD || '' }}
+      APPLE_TEAM_ID: ${{ matrix.apple_signing && secrets.APPLE_TEAM_ID || '' }}
+      APPLE_API_ISSUER: ${{ matrix.apple_signing && secrets.APPLE_API_ISSUER || '' }}
+      APPLE_API_KEY: ${{ matrix.apple_signing && secrets.APPLE_API_KEY || '' }}
+      APPLE_API_KEY_CONTENT: ${{ matrix.apple_signing && secrets.APPLE_API_KEY_CONTENT || '' }}
       APPLE_API_KEY_PATH: ${{ github.workspace }}/source/AuthKey.p8
     steps:
       - name: Check out verified private Desktop source revision
@@ -207,6 +213,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
       - name: Validate optional Apple signing credentials
+        if: matrix.apple_signing
+        shell: bash
         run: |
           set -euo pipefail
           apple_names=(
@@ -277,7 +285,7 @@ jobs:
           key: public-release-${{ matrix.target }}
 
       - name: Import Apple Developer certificate
-        if: env.APPLE_CERTIFICATE != ''
+        if: matrix.apple_signing && env.APPLE_CERTIFICATE != ''
         working-directory: source
         shell: bash
         env:
@@ -294,7 +302,7 @@ jobs:
           security find-identity -v -p codesigning build.keychain
 
       - name: Prepare App Store Connect API key
-        if: env.APPLE_API_KEY_CONTENT != ''
+        if: matrix.apple_signing && env.APPLE_API_KEY_CONTENT != ''
         working-directory: source
         shell: bash
         run: |
@@ -311,7 +319,7 @@ jobs:
           releaseId: ${{ needs.prepare-release.outputs.release_id }}
           tagName: ${{ inputs.desktop_tag }}
           releaseName: WorkPaw Desktop ${{ inputs.desktop_tag }}
-          releaseBody: WorkPaw Desktop macOS release.
+          releaseBody: WorkPaw Desktop release.
           releaseDraft: true
           prerelease: ${{ needs.preflight.outputs.is_prerelease }}
           releaseCommitish: main
@@ -324,7 +332,7 @@ jobs:
           args: --target ${{ matrix.target }}
 
       - name: Remove temporary Apple signing material
-        if: always()
+        if: always() && matrix.apple_signing
         working-directory: source
         shell: bash
         run: |
@@ -359,6 +367,7 @@ jobs:
             (.platforms | type == "object") and
             (.platforms | has("darwin-aarch64")) and
             (.platforms | has("darwin-x86_64")) and
+            (.platforms | has("windows-x86_64")) and
             ([.platforms[] | select((.signature // "") == "")] | length == 0) and
             ([.platforms[] | select(
               (.url // "") |
@@ -368,10 +377,12 @@ jobs:
             )] | length == 0)
           ' "$manifest" >/dev/null
           gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets \
-            --jq '[.assets[] | {apiUrl, url}]' > release-assets/urls.json
-          jq -e --slurpfile assets release-assets/urls.json '
+            --jq '[.assets[] | {apiUrl, name, url}]' > release-assets/assets.json
+          jq -e --slurpfile assets release-assets/assets.json '
             ($assets[0] // []) as $uploaded |
             [.platforms[].url] as $requiredUrls |
+            ($uploaded | any(.name | endswith(".exe"))) and
+            ($uploaded | any(.name | endswith(".msi"))) and
             all(
               $requiredUrls[];
               . as $requiredUrl |

@@ -10,6 +10,7 @@ WorkPaw Desktop 的公开制品分发与自动构建编排仓库。
 
 - macOS Apple Silicon：`*_aarch64.dmg`
 - macOS Intel：`*_x64.dmg`
+- Windows x64：`*_x64-setup.exe`（也提供 MSI 安装包）
 
 应用内自动更新从本仓库的公开 Release 获取：
 
@@ -23,13 +24,14 @@ https://github.com/rising-biz/workpaw-releases/releases/latest/download/latest.j
 
 - `macos-15` / `aarch64-apple-darwin`
 - `macos-15-intel` / `x86_64-apple-darwin`
+- `windows-2025` / `x86_64-pc-windows-msvc`
 
 工作流会：
 
 1. 验证私有 Desktop 的**已存在、带注释且可从 `main` 到达**的 `vMAJOR.MINOR.PATCH[-prerelease]` 标签及全部应用版本号。
 2. 将标签解析为不可变提交 SHA，并且只从该 SHA 在临时运行器中构建。
-3. 复用草稿 Release，串行上传两个 Tauri updater 签名制品，避免并发覆盖 `latest.json`。
-4. 下载并校验草稿中的 `latest.json`、两个 macOS 平台条目、签名、公开下载 URL 和对应已上传资产。
+3. 复用草稿 Release，串行上传三个 Tauri updater 签名制品，避免并发覆盖 `latest.json`。
+4. 下载并校验草稿中的 `latest.json`、三个原生平台条目、签名、公开下载 URL 和对应已上传资产。
 5. 仅在校验成功后发布 Release。失败时保留草稿，供受控重试，不发布不完整制品。
 
 工作流使用本仓库自动提供、且仅有本仓库 `contents: write` 权限的 `GITHUB_TOKEN` 写入公开 Release。它不使用跨仓库发布写入令牌。
@@ -58,14 +60,14 @@ https://github.com/rising-biz/workpaw-releases/releases/latest/download/latest.j
 gh workflow run build-desktop-release.yml \
   --repo rising-biz/workpaw-releases \
   --ref main \
-  -f desktop_tag=v0.0.17
+  -f desktop_tag=v0.0.18
 ```
 
-一旦触发，构建会自动执行；两个 macOS 构建成功且 manifest 校验通过后，Release 自动公开。
+一旦触发，构建会自动执行；三个原生构建成功且 manifest 校验通过后，Release 自动公开。
 
 ## 安全边界
 
 - 本仓库不会接收、提交、上传或缓存 Desktop 源代码作为发布资产。
 - 私有源访问令牌只传入临时构建作业，检出时禁用 Git 凭据持久化。
-- 更新制品始终使用 Tauri updater 私钥签名。若未配置 Apple 凭据，制品不得宣称为 Apple 代码签名或已公证。
+- 更新制品始终使用 Tauri updater 私钥签名。若未配置 Apple 凭据，macOS 制品不得宣称为 Apple 代码签名或已公证；Windows x64 制品在未配置单独的 Windows 代码签名凭据时，也不得宣称已完成 Authenticode 签名。
 - 已发布 Release 不允许被工作流覆盖；同一标签的失败重试只会复用草稿 Release。
