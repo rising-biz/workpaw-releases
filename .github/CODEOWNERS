@@ -1,2 +1,2 @@
-# Public release workflow changes require review by the release maintainer.
+# Public release workflow ownership.
 /.github/workflows/** @mautops

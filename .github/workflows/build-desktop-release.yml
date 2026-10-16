@@ -9,7 +9,7 @@ on:
         type: string
 
 concurrency:
-  group: public-desktop-release-${{ inputs.desktop_tag }}
+  group: public-desktop-releases-${{ inputs.desktop_tag }}
   cancel-in-progress: false
 
 # This token can write releases only in this public artifact repository. Private
@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
-      name: desktop-release
+      name: desktop-releases
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
       is_prerelease: ${{ steps.release-input.outputs.is_prerelease }}
@@ -52,7 +52,7 @@ jobs:
           fi
           for name in WORKPAW_DESKTOP_READ_TOKEN TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             if [[ -z "${!name}" ]]; then
-              echo "Missing required desktop-release Environment secret: $name" >&2
+              echo "Missing required desktop-releases Environment secret: $name" >&2
               exit 1
             fi
           done
@@ -173,7 +173,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     environment:
-      name: desktop-release
+      name: desktop-releases
     env:
       SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
       RELEASE_TAG: ${{ inputs.desktop_tag }}
