@@ -26,6 +26,19 @@ https://github.com/rising-biz/workpaw-releases/releases/download/<tag>/<asset-na
 
 禁止写入 GitHub REST API 制品地址。客户端更新请求不携带 GitHub API 令牌或 API 媒体类型，REST 制品地址会返回 `403 Forbidden`。
 
+## 国内镜像分发
+
+内网或慢速网络环境可将 Release 制品原样镜像到自有静态服务器(OSS / MinIO / nginx),
+目录结构保持 `releases/download/<tag>/<asset>`。把官方 `latest.json` 改写为镜像地址:
+
+```bash
+node scripts/make-mirror-manifest.mjs latest.json https://mirror.example.com/workpaw
+```
+
+生成 `latest.mirror.json`,其中全部制品 URL 指向镜像源。桌面端配合
+`WORKPAW_UPDATE_ENDPOINT` 指向该文件即可完成内网自动更新(见 Desktop
+`docs/private-updater.md`);签名不变,客户端公钥无需调整。
+
 ## 自动桌面客户端发布
 
 `.github/workflows/build-desktop-release.yml` 是唯一的桌面构建入口。它只能从本仓库的 `main` 手动触发，触发后无需人工审批，并固定构建以下原生目标：
