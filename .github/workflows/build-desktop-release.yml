@@ -442,7 +442,7 @@ jobs:
             ($uploaded | any(.name | endswith(".msi"))) and
             ($uploaded | any(.name | endswith(".deb"))) and
             ($uploaded | any(.name | endswith(".rpm"))) and
-            ($uploaded | any(.name | endswith(".AppImage.tar.gz"))) and
+            ($uploaded | any(.name | endswith(".AppImage"))) and
             all(
               $requiredUrls[];
               . as $requiredUrl |
