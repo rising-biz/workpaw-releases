@@ -1,0 +1,45 @@
+# 下载站同步：把最新正式 release 的安装包搬到 COS download/<tag>/ 并重渲
+# 静态页。页面与安装包全量托管在 COS（桶公有读），无 VM/nginx。
+#
+# 边界（与仓库 CLAUDE.md 一致）：仅手动从 main 运行；COS 凭据放在
+# desktop-releases Environment（COS_ACCESS_KEY_ID / COS_SECRET_ACCESS_KEY），
+# 与其他发布秘密同一存放边界；只写 COS 的 download/、history/ 前缀与
+# 页面对象，绝不触碰 Keygate 更新链路对象。
+name: sync-download-site
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-download-site
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    environment: desktop-releases
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rclone
+        run: sudo apt-get update && sudo apt-get install -y rclone
+
+      - name: Sync download site to COS
+        env:
+          RCLONE_CONFIG_COS_TYPE: s3
+          RCLONE_CONFIG_COS_PROVIDER: TencentCOS
+          RCLONE_CONFIG_COS_ACCESS_KEY_ID: ${{ secrets.COS_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_COS_SECRET_ACCESS_KEY: ${{ secrets.COS_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_COS_ENDPOINT: https://cos.ap-guangzhou.myqcloud.com
+          COS_REMOTE: cos:workpaw-1253566621
+          COS_PUBLIC_BASE: https://workpaw-1253566621.cos.ap-guangzhou.myqcloud.com
+          SITE_ROOT: ${{ runner.temp }}/site
+          CACHE_ROOT: ${{ runner.temp }}/cache
+          GITHUB_TOKEN: ${{ github.token }}
+          # Apple Developer Program 公证版发布进站后，在此加一行
+          # APPLE_SIGNED: 'true'
+        run: download-site/build-site.sh

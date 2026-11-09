@@ -1,38 +1,42 @@
 #!/usr/bin/env bash
-# WorkPaw Desktop 内网下载站同步脚本
+# WorkPaw Desktop 内网下载站同步脚本（无 VM：页面与安装包全量托管在腾讯 COS）
 #
-# 在 VM 上运行（cron 或手动）。做五件事：
+# 跑在 GitHub Actions（.github/workflows/sync-download-site.yml，手动
+# dispatch）或任何装有 rclone 的工作机上。流程：
 #   1. 从 GitHub API 取 workpaw-releases 最新正式 release
-#   2. 把人工装机用的安装包（dmg/setup.exe/msi/AppImage/deb/rpm）下载到本地
-#      缓存目录 —— .sig 与 .app.tar.gz（更新器内部产物）不入站
-#   3. rclone 把安装包上传到腾讯 COS 的 download/<tag>/ 前缀（桶公有读，
-#      内网机器直接从 COS 域名下载，VM 不出服务流量）
-#      —— 只动 download/ 前缀，绝不触碰 Keygate 更新链路的对象
-#   4. 轮换：本地缓存与 COS 都只保留最近 KEEP 个版本
-#   5. 渲染纯静态下载页（零运行时依赖，内网断外网也照常工作），
-#      下载链接直接指向 COS 公网 URL
+#   2. 下载人工装机用的安装包（dmg/setup.exe/msi/AppImage/deb/rpm）到临时
+#      缓存 —— .sig 与 .app.tar.gz（更新器内部产物）不入站 —— 算 sha256
+#   3. 安装包 + manifest.tsv 上传 COS 的 download/<tag>/ 前缀
+#   4. 轮换：以 COS 的 download/ 目录清单为准，只保留最近 KEEP 个版本
+#   5. 渲染纯静态下载页（含每版本历史页），整体上传到桶根 ——
+#      站点地址即 COS 对象 URL：${COS_PUBLIC_BASE}/index.html
 #
-# 部署见同目录 README.md。环境变量：
-#   SITE_ROOT        渲染产物目录（默认 /srv/workpaw-download，nginx root 指向它）
-#   CACHE_ROOT       安装包本地缓存（默认 /var/cache/workpaw-download）
-#   KEEP             保留版本数（默认 3）
-#   APPLE_SIGNED     macOS 包是否已 Apple 签名（false=页面显示 xattr 放行指引；
-#                    接入 Apple Developer Program 签名公证后置 true 收起指引）
-#   GH_MIRROR        可选，GitHub 下载镜像前缀（VM 直连 GitHub 不稳时配置；
-#                    API 调用不走镜像）
-#   GITHUB_TOKEN     可选，提高 API 限额（只读公开仓库无需配置）
-#   COS_REMOTE       rclone remote:bucket（默认 cos:workpaw-1253566621；
-#                    remote 的密钥等配置放 /etc/workpaw-download.env，见 README）
+# 本脚本只写 download/ 前缀、history/ 前缀和页面对象（index.html、
+# site.css、site.js、CURRENT-VERSION.txt）；桶根的 Keygate 更新链路对象
+# 永不触碰，也绝不用 sync 模式清理桶根。
+#
+# 环境变量：
+#   SITE_ROOT        页面渲染产物目录（临时目录即可，会上传到桶根）
+#   CACHE_ROOT       安装包临时缓存与状态目录（临时目录即可）
+#   KEEP             保留版本数（默认 3，含当前版本）
+#   APPLE_SIGNED     macOS 包是否已 Apple 签名（false=页面显示 xattr 放行
+#                    指引；公证版发布后置 true 收起指引）
+#   GH_MIRROR        可选，GitHub 下载镜像前缀（直连不稳的工作机上用；
+#                    API 调用不走镜像；Actions 上无需）
+#   GITHUB_TOKEN     可选，提高 API 限额（Actions 自带）
+#   COS_REMOTE       rclone remote:bucket（默认 cos:workpaw-1253566621）
 #   COS_PUBLIC_BASE  桶公网访问基址（默认广州地域虚拟主机式域名）
+#   /etc/workpaw-download.env 存在则自动 source（工作机手动跑时的密钥入口；
+#   Actions 上密钥经 Environment secrets 以 RCLONE_CONFIG_COS_* 注入）
 set -euo pipefail
 
-# 可选环境文件（cron 部署用）：rclone 配置 / APPLE_SIGNED / GH_MIRROR 等写在这里
 [ -r /etc/workpaw-download.env ] && . /etc/workpaw-download.env
 
 REPO="${REPO:-rising-biz/workpaw-releases}"
-SITE_ROOT="${SITE_ROOT:-/srv/workpaw-download}"
-CACHE_ROOT="${CACHE_ROOT:-/var/cache/workpaw-download}"
+SITE_ROOT="${SITE_ROOT:-/tmp/workpaw-download-site}"
+CACHE_ROOT="${CACHE_ROOT:-/tmp/workpaw-download-cache}"
 KEEP="${KEEP:-3}"
+[ "$KEEP" -ge 1 ] || KEEP=3
 APPLE_SIGNED="${APPLE_SIGNED:-false}"
 GH_BASE="${GH_MIRROR:-https://github.com}"
 COS_REMOTE="${COS_REMOTE:-cos:workpaw-1253566621}"
@@ -42,18 +46,19 @@ log() { printf '[workpaw-download] %s\n' "$*" >&2; }
 
 command -v rclone >/dev/null || { log "FATAL: rclone 未安装（见 README）"; exit 1; }
 rclone listremotes | grep -qx 'cos:' || {
-  log "FATAL: rclone 未配置 remote 'cos'（见 README 的 /etc/workpaw-download.env）"; exit 1; }
+  log "FATAL: rclone 未配置 remote 'cos'（Actions 上由 RCLONE_CONFIG_COS_* 注入；工作机见 README）"; exit 1; }
 
-mkdir -p "${SITE_ROOT}/history" "${CACHE_ROOT}/versions" "${SITE_ROOT}/.state/manifests"
+STATE="${CACHE_ROOT}/state"
+mkdir -p "${SITE_ROOT}/history" "${CACHE_ROOT}/versions" "$STATE"
 
 # ── 1. 最新正式 release 元数据 ───────────────────────────────────────────
 curl -fsSL --retry 4 --retry-delay 5 \
   -H 'Accept: application/vnd.github+json' \
   ${GITHUB_TOKEN:+-H "Authorization: Bearer ${GITHUB_TOKEN}"} \
   "https://api.github.com/repos/${REPO}/releases/latest" \
-  > "${SITE_ROOT}/.state/release.raw.json"
+  > "$STATE/release.raw.json"
 
-python3 - "${SITE_ROOT}/.state/release.raw.json" "${SITE_ROOT}/.state/release.json" <<'PY'
+python3 - "$STATE/release.raw.json" "$STATE/release.json" <<'PY'
 import json, sys
 raw, out = sys.argv[1], sys.argv[2]
 rel = json.load(open(raw))
@@ -75,15 +80,15 @@ json.dump(
     open(out, "w"), ensure_ascii=False)
 PY
 
-TAG="$(python3 -c 'import json; print(json.load(open("'"${SITE_ROOT}/.state/release.json"'"))["tag"])')"
+TAG="$(python3 -c 'import json; print(json.load(open("'"$STATE"'/release.json"))["tag"])')"
 DEST="${CACHE_ROOT}/versions/${TAG}"
 mkdir -p "$DEST"
 log "target release ${TAG}"
 
-# ── 2. 下载安装包到本地缓存（跳过已存在文件），产出校验清单 TSV ──────────
-MANIFEST="${SITE_ROOT}/.state/manifest.tsv"
-ASSETS="${SITE_ROOT}/.state/assets.tsv"
-python3 - "${SITE_ROOT}/.state/release.json" > "$ASSETS" <<'PY'
+# ── 2. 下载安装包到临时缓存（跳过本地已存在文件），产出校验清单 ──────────
+MANIFEST="$STATE/manifest.tsv"
+ASSETS="$STATE/assets.tsv"
+python3 - "$STATE/release.json" > "$ASSETS" <<'PY'
 import json, sys
 for a in json.load(open(sys.argv[1]))["assets"]:
     print(f'{a["name"]}\t{a["url"]}\t{a["size"]}')
@@ -107,43 +112,71 @@ while IFS=$'\t' read -r name url size; do
   fi
   printf '%s\t%s\t%s\n' "$name" "$(sha256sum "$f" | cut -d' ' -f1)" "$size"
 done < "$ASSETS" > "$MANIFEST"
-cp "$MANIFEST" "${SITE_ROOT}/.state/manifests/${TAG}.tsv"
 
-# ── 3. 上传 COS（download/<tag>/ 前缀；已存在同内容对象自动跳过） ────────
+# ── 3. 上传 COS：安装包 + 校验清单进 download/<tag>/ ─────────────────────
 # 只写 download/ 前缀；Keygate 更新链路（其余前缀）永不被本脚本触碰。
 log "upload ${TAG} → ${COS_REMOTE}/download/${TAG}"
-rclone copy "${DEST}" "${COS_REMOTE}/download/${TAG}" --s3-no-check-bucket
+rclone copy "$DEST" "${COS_REMOTE}/download/${TAG}" --s3-no-check-bucket
+rclone copyto "$MANIFEST" "${COS_REMOTE}/download/${TAG}/manifest.tsv" --s3-no-check-bucket
 
-# ── 4. 轮换旧版本（本地缓存 + COS 同步裁剪，先于渲染——历史列表只列存活目录） ──
-ls -1d "${CACHE_ROOT}"/versions/v* 2>/dev/null | sort -V | head -n -"${KEEP}" | \
-  while read -r old; do
-    t="$(basename "$old")"
-    log "prune ${t} (disk + cos)"
-    rm -rf "$old"
-    # 上轮 COS purge 成功但本地删除失败重入时，前缀可能已不存在——先探测再删
-    if rclone lsf "${COS_REMOTE}/download/${t}" --s3-no-check-bucket >/dev/null 2>&1; then
-      rclone purge "${COS_REMOTE}/download/${t}" --s3-no-check-bucket
-    fi
-  done
+# ── 4. 轮换（以 COS 的 download/ 目录清单为准；本地缓存跟随裁剪） ────────
+# COS 是唯一事实源——Actions 每次全新环境，本地缓存不能作为依据。
+# purge 失败不致命（|| true）：残留前缀下轮重试，页面只引用存活目录。
+COS_DIRS="$(rclone lsf "${COS_REMOTE}/download/" --dirs-only --s3-no-check-bucket 2>/dev/null | sed 's:/$::' | sort -V || true)"
+PRUNE="$(printf '%s\n' "$COS_DIRS" | awk 'NF' | head -n -"${KEEP}")"
+printf '%s\n' "$PRUNE" | while read -r t; do
+  [ -n "$t" ] && [ "$t" != "$TAG" ] || continue
+  log "prune ${t} (download/ + history/ + cache)"
+  rclone purge "${COS_REMOTE}/download/${t}" --s3-no-check-bucket || true
+  # 历史页是 history/<t>.html 对象（非子前缀），按文件名精确删，
+  # 避免 purge 前缀匹配在 tag 名互为前缀时误删存活版本页面
+  rclone delete "${COS_REMOTE}/history" --include "${t}.html" --s3-no-check-bucket || true
+  rm -rf "${CACHE_ROOT}/versions/${t}" || true
+done
 
-# ── 5. 渲染静态页 ───────────────────────────────────────────────────────
-WD_VERSIONS_DIR="${CACHE_ROOT}/versions" \
-python3 - "${SITE_ROOT}" "${TAG}" "${APPLE_SIGNED}" "${COS_PUBLIC_BASE}" <<'PY'
-import glob, html, json, os, sys
+# ── 5. 收集存活版本清单与各版本 manifest（历史页渲染数据） ───────────────
+# prune 之后再取清单——以 COS 当前实态为准，绝不引用刚裁掉的版本
+SURVIVING="$(rclone lsf "${COS_REMOTE}/download/" --dirs-only --s3-no-check-bucket 2>/dev/null | sed 's:/$::' | awk -v t="$TAG" 'NF && $0 != t' | sort -rV || true)"
+printf '%s\n' "$SURVIVING" | awk 'NF' > "$STATE/surviving.txt"
+mkdir -p "$STATE/manifests" "$STATE/filelists"
+printf '%s\n' "$SURVIVING" | while read -r t; do
+  [ -n "$t" ] || continue
+  if ! rclone copyto "${COS_REMOTE}/download/${t}/manifest.tsv" \
+        "$STATE/manifests/${t}.tsv" --s3-no-check-bucket 2>/dev/null; then
+    : > "$STATE/manifests/${t}.tsv"
+  fi
+  rclone lsf "${COS_REMOTE}/download/${t}" --files-only --s3-no-check-bucket \
+    > "$STATE/filelists/${t}.txt" 2>/dev/null || : > "$STATE/filelists/${t}.txt"
+done
+# 当前版本的 manifest 刚生成过，直接复用（收集循环只覆盖历史版本）
+cp "$MANIFEST" "$STATE/manifests/${TAG}.tsv"
 
-site_root, tag, apple_signed, cos_base = sys.argv[1:5]
-rel = json.load(open(f"{site_root}/.state/release.json"))
+# ── 6. 渲染静态页 ───────────────────────────────────────────────────────
+python3 - "$SITE_ROOT" "$TAG" "$APPLE_SIGNED" "$COS_PUBLIC_BASE" "$STATE" <<'PY'
+import html, json, os, sys
 
-def load_manifest(t):
-    files = []
-    for line in open(f"{site_root}/.state/manifests/{t}.tsv"):
-        name, sha, size = line.rstrip("\n").split("\t")
-        files.append({"name": name, "sha256": sha, "size": int(size)})
-    return files
+site_root, tag, apple_signed, cos_base, state = sys.argv[1:6]
+rel = json.load(open(f"{state}/release.json"))
+surviving = [l.strip() for l in open(f"{state}/surviving.txt") if l.strip()]
+
+def files_of(t):
+    """有 manifest 用 manifest；没有则退化为纯文件名清单（无 sha/大小）。"""
+    mp = f"{state}/manifests/{t}.tsv"
+    if os.path.exists(mp) and os.path.getsize(mp):
+        out = []
+        for line in open(mp):
+            name, sha, size = line.rstrip("\n").split("\t")
+            out.append({"name": name, "sha256": sha, "size": int(size)})
+        return out, True
+    names = [l.strip() for l in open(f"{state}/filelists/{t}.txt") if l.strip()]
+    return ( [{"name": n, "sha256": "", "size": None} for n in names if not n.startswith("manifest.")],
+             False )
 
 esc = lambda s: html.escape(s, quote=True)
 
 def fmt_size(n):
+    if n is None:
+        return "—"
     if n < 1024:
         return f"{n} B"
     for unit in ("KB", "MB", "GB"):
@@ -166,18 +199,24 @@ BY_PLATFORM = [
     ("linux", "Linux", "x64 与 arm64（信创）"),
 ]
 
+def file_row(a, t):
+    sha = a.get("sha256") or ""
+    sha_cell = (f'<details><summary><code>{sha[:16]}…</code></summary>'
+                f'<code class="sha-full">{sha}</code></details>') if sha else "—"
+    return f'''        <tr>
+          <th scope="row">{esc(a["name"])}</th>
+          <td class="num">{fmt_size(a["size"])}</td>
+          <td class="sha">{sha_cell}</td>
+          <td><a class="btn" href="{cos_base}/download/{esc(t)}/{esc(a["name"])}" download>下载</a></td>
+        </tr>'''
+
 def sections_html(files, t):
     out = []
     for key, label, hint in BY_PLATFORM:
         rows = [a for a in files if platform_of(a["name"]) == key]
         if not rows:
             continue
-        body = "\n".join(f'''        <tr>
-          <th scope="row">{esc(a["name"])}</th>
-          <td class="num">{fmt_size(a["size"])}</td>
-          <td class="sha"><details><summary><code>{a["sha256"][:16]}…</code></summary><code class="sha-full">{a["sha256"]}</code></details></td>
-          <td><a class="btn" href="{cos_base}/download/{esc(t)}/{esc(a["name"])}" download>下载</a></td>
-        </tr>''' for a in rows)
+        body = "\n".join(file_row(a, t) for a in rows)
         out.append(f'''  <section aria-labelledby="p-{key}">
     <h2 id="p-{key}">{label}</h2>
     <p class="hint">{esc(hint)}</p>
@@ -223,47 +262,41 @@ if apple_signed.lower() != "true":
 
 notes = html.escape(rel["notes"]).strip() or "（无发布说明）"
 
-# 历史版本：仅列本地缓存仍存活的版本目录（与 COS 轮换保持一致）
-versions_dir = os.environ.get("WD_VERSIONS_DIR", "/var/cache/workpaw-download/versions")
-living = sorted(
-    (v for v in os.listdir(versions_dir) if v.startswith("v")),
-    reverse=True)
-living = [v for v in living if v != tag]
-
 # 每个存活的历史版本渲染独立页面（链接同样直指 COS）
 os.makedirs(f"{site_root}/history", exist_ok=True)
-for v in living:
-    mp = f"{site_root}/.state/manifests/{v}.tsv"
-    if not os.path.exists(mp):
-        continue
+for v in surviving:
+    files, has_manifest = files_of(v)
+    extra = "" if has_manifest else '    <p class="hint">此版本无校验清单（早期同步），仅提供文件下载。</p>\n'
     body = (f'  <header>\n    <h1>WorkPaw Desktop {esc(v)}</h1>\n'
             f'    <p class="meta">历史版本，仅作回退用途。</p>\n  </header>\n'
-            + sections_html(load_manifest(v), v))
+            + extra
+            + sections_html(files, v))
     open(f"{site_root}/history/{v}.html", "w").write(
         page(f"WorkPaw Desktop {esc(v)}", body, back=True))
-# 清掉已轮换版本的残留历史页
-for f in glob.glob(f"{site_root}/history/v*.html"):
-    v = os.path.basename(f)[:-5]
-    if v != tag and v not in living:
-        os.remove(f)
+# 清掉已轮换版本的残留历史页（本地产物；COS 侧对应对象在轮换循环里删除）
+surv_set = set(surviving)
+for f in os.listdir(f"{site_root}/history"):
+    if f.endswith(".html") and f[:-5] not in surv_set:
+        os.remove(os.path.join(f"{site_root}/history", f))
 
 history_items = "\n".join(
-    f'        <li><a href="history/{esc(v)}.html">{esc(v)}</a></li>' for v in living)
+    f'        <li><a href="history/{esc(v)}.html">{esc(v)}</a></li>' for v in surviving)
 history = (f'''  <section aria-labelledby="history">
     <h2 id="history">历史版本</h2>
     <ul class="history">
 {history_items}
     </ul>
     <p class="hint">旧版本仅作回退用途，日常装机请使用上方 {esc(tag)}。</p>
-  </section>''') if living else ""
+  </section>''') if surviving else ""
 
 published_date = rel["published"][:10]
+cur_files, _ = files_of(tag)  # 当前版本刚上传过 manifest，必走 manifest 分支
 body = f'''  <header>
     <h1>WorkPaw Desktop 下载</h1>
     <p class="meta">当前版本 <strong>{esc(tag)}</strong> · 发布于 <time datetime="{esc(rel["published"])}">{published_date}</time></p>
   </header>
 {mac_notice}
-{sections_html(load_manifest(tag), tag)}
+{sections_html(cur_files, tag)}
   <section aria-labelledby="notes">
     <h2 id="notes">发布说明</h2>
     <pre class="notes">{notes}</pre>
@@ -359,4 +392,9 @@ open(f"{site_root}/CURRENT-VERSION.txt", "w").write(tag + "\n")
 print(f"[workpaw-download] rendered {tag} → {site_root}/index.html")
 PY
 
-log "done: ${TAG} → ${SITE_ROOT} (安装包经 ${COS_PUBLIC_BASE} 分发)"
+# ── 7. 页面上传到桶根（站点地址即 ${COS_PUBLIC_BASE}/index.html） ───────
+# copy（只增改）而非 sync——桶根还有 Keygate 对象，绝不能被裁剪。
+log "upload site → ${COS_REMOTE}/ (page URL: ${COS_PUBLIC_BASE}/index.html)"
+rclone copy "$SITE_ROOT" "${COS_REMOTE}/" --s3-no-check-bucket
+
+log "done: ${TAG} → ${COS_PUBLIC_BASE}/index.html"
