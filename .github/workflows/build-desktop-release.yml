@@ -22,7 +22,7 @@ env:
   RELEASE_REPOSITORY: rising-biz/workpaw-releases
   SOURCE_REPOSITORY: rising-biz/workpaw-desktop
   WORKPAW_UI_REPOSITORY: https://github.com/rising-biz/workpaw-ui.git
-  WORKPAW_UI_REF: 9cae912cd92af1cde3cc3c548764105221348cf4 # reviewed workpaw-ui commit
+  WORKPAW_UI_REF: 2c3bf4beee8d2ee4954ff8f958df88dfaa7d1ed0 # reviewed workpaw-ui commit
 
 jobs:
   preflight:
