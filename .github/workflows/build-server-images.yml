@@ -1,0 +1,384 @@
+name: Build WorkPaw Server Images
+
+# 发版时从源码构建服务器镜像并推送到 docker.io/workpaw：
+#   workpaw-admin（API+网关镜像）、workpaw-admin-console（管理后台前端）、
+#   workpaw-web（Web 全功能端）、workpaw-operator（实例 Operator）。
+# 全部发布 linux/amd64 + linux/arm64（信创鲲鹏/飞腾）双架构 manifest。
+#
+# 与 build-desktop-release.yml 同一安全模型：
+#   - 只允许从 main 手动 dispatch；禁止 push/PR/外部事件触发器；
+#   - 私有源码读取令牌与 Docker Hub 凭据只存在于 desktop-releases
+#     Environment（禁止仓库级秘密），每个作业都带 repository/ref 守卫；
+#   - 本工作流绝不检出 workpaw-desktop 源码。
+#
+# 镜像版本溯源：admin 镜像内嵌 VERSION=git-<源码短 SHA>（workpaw-admin
+# version 命令输出）；每次发布产出四个镜像 digest，在 summary 汇总供
+# 部署交付包 §7.5 供应链加固时回填。
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to publish, for example 20261110 (matches deploy.env TAG)'
+        required: true
+        type: string
+      admin_ref:
+        description: 'workpaw-admin git ref (branch, tag or SHA)'
+        required: false
+        default: 'main'
+        type: string
+      web_ref:
+        description: 'workpaw-web git ref (branch, tag or SHA)'
+        required: false
+        default: 'main'
+        type: string
+      operator_ref:
+        description: 'workpaw-operator git ref (also embedded into the admin image via go.mod replace)'
+        required: false
+        default: 'main'
+        type: string
+
+concurrency:
+  group: server-images-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAMESPACE: workpaw
+  # reviewed workpaw-ui commit（与 build-desktop-release.yml 同一钉版；
+  # 源码仓库各自 CI 的 UI 钉版更新时一并评估）
+  WORKPAW_UI_REF: 2c3bf4beee8d2ee4954ff8f958df88dfaa7d1ed0
+
+jobs:
+  preflight:
+    name: Validate inputs and release secrets
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: desktop-releases
+    steps:
+      - name: Validate image tag and required Environment secrets
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          WORKPAW_IMAGE_SOURCE_TOKEN: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "image_tag must be a valid Docker tag (letters/digits/._-, up to 128 chars), received: $IMAGE_TAG" >&2
+            exit 1
+          fi
+          for name in WORKPAW_IMAGE_SOURCE_TOKEN DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required desktop-releases Environment secret: $name" >&2
+              exit 1
+            fi
+          done
+          echo "image_tag=$IMAGE_TAG; required desktop-releases Environment secrets present."
+
+  admin-image:
+    name: workpaw-admin image
+    needs: preflight
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment:
+      name: desktop-releases
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Check out workpaw-admin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-admin
+          ref: ${{ inputs.admin_ref }}
+          token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
+          persist-credentials: false
+          path: workpaw-admin
+
+      # workpaw-admin/Dockerfile builds from the workspace root: this sibling
+      # checkout satisfies go.mod `replace => ../workpaw-operator`. If admin
+      # main and operator main have drifted apart, this build fails loudly;
+      # re-dispatch with matching explicit refs.
+      - name: Check out workpaw-operator (sibling module)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-operator
+          ref: ${{ inputs.operator_ref }}
+          token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
+          persist-credentials: false
+          path: workpaw-operator
+
+      - name: Resolve admin image version label
+        working-directory: workpaw-admin
+        run: |
+          set -euo pipefail
+          VERSION="git-$(git rev-parse --short=12 HEAD)"
+          [ "${#VERSION}" -le 32 ] || { echo "VERSION exceeds 32 bytes: $VERSION" >&2; exit 1; }
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
+          echo "Admin image version label: $VERSION"
+
+      # The Go build stage stays on $BUILDPLATFORM (cross-compile, no
+      # emulation); binfmt is only needed for the alpine runtime stage's
+      # `apk add`/`adduser` running under the arm64 target.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81f92030d7c504f8500d16e6b83117e # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e68b1637d43 # v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: workpaw-admin/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-admin:${{ inputs.image_tag }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  console-image:
+    name: workpaw-admin-console image
+    needs: preflight
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment:
+      name: desktop-releases
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Check out workpaw-admin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-admin
+          ref: ${{ inputs.admin_ref }}
+          token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
+          persist-credentials: false
+          path: workpaw-admin
+
+      # The console Dockerfile builds from the workspace root: this sibling
+      # checkout satisfies its file:../../workpaw-ui dependency (public repo,
+      # no token required). The pnpm install/build both happen inside the
+      # image build itself (corepack reads the console's pinned
+      # packageManager), matching workpaw-admin's own build-images.yml.
+      - name: Check out workpaw-ui (pinned)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-ui
+          ref: ${{ env.WORKPAW_UI_REF }}
+          persist-credentials: false
+          path: workpaw-ui
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e68b1637d43 # v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The JS build runs natively on $BUILDPLATFORM; the nginx runtime stage
+      # only COPYs files per target platform.
+      - name: Build and push multi-arch image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: workpaw-admin/console/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-admin-console:${{ inputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  web-image:
+    name: workpaw-web image
+    needs: preflight
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment:
+      name: desktop-releases
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Check out workpaw-web
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-web
+          ref: ${{ inputs.web_ref }}
+          token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
+          persist-credentials: false
+          path: workpaw-web
+
+      # web resolves workpaw-ui via file:../workpaw-ui and needs the shared
+      # library built first (public repo, no token required) — the same
+      # sequence as workpaw-web's own build.yml.
+      - name: Check out workpaw-ui (pinned)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-ui
+          ref: ${{ env.WORKPAW_UI_REF }}
+          persist-credentials: false
+          path: workpaw-ui
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11.11.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            workpaw-web/pnpm-lock.yaml
+            workpaw-ui/pnpm-lock.yaml
+
+      - name: Build shared workpaw-ui
+        working-directory: workpaw-ui
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Build workpaw-web
+        working-directory: workpaw-web
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e68b1637d43 # v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Dockerfile.release expects the pre-built dist/ and nginx.conf inside
+      # the context; the JS build above is architecture-independent, and the
+      # nginx runtime stage only COPYs files per target platform.
+      - name: Build and push multi-arch image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: workpaw-web
+          file: workpaw-web/Dockerfile.release
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-web:${{ inputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  operator-image:
+    name: workpaw-operator image
+    needs: preflight
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment:
+      name: desktop-releases
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Check out workpaw-operator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rising-biz/workpaw-operator
+          ref: ${{ inputs.operator_ref }}
+          token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
+          persist-credentials: false
+          path: workpaw-operator
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e68b1637d43 # v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The Go build stage stays on $BUILDPLATFORM; the scratch runtime stage
+      # only COPYs the static binary and CA bundle per target platform.
+      - name: Build and push multi-arch image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: workpaw-operator
+          file: workpaw-operator/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-operator:${{ inputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  summary:
+    name: Summarize published images
+    needs: [admin-image, console-image, web-image, operator-image]
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Verify digests and write release summary
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ADMIN_DIGEST: ${{ needs.admin-image.outputs.digest }}
+          CONSOLE_DIGEST: ${{ needs.console-image.outputs.digest }}
+          WEB_DIGEST: ${{ needs.web-image.outputs.digest }}
+          OPERATOR_DIGEST: ${{ needs.operator-image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          failed=0
+          {
+            echo "### WorkPaw server images published to \`docker.io/workpaw\`"
+            echo
+            echo "Tag: \`$IMAGE_TAG\` · platforms: linux/amd64, linux/arm64"
+            echo
+            echo "| Image | Digest |"
+            echo "|---|---|"
+            for entry in \
+              "workpaw-admin|$ADMIN_DIGEST" \
+              "workpaw-admin-console|$CONSOLE_DIGEST" \
+              "workpaw-web|$WEB_DIGEST" \
+              "workpaw-operator|$OPERATOR_DIGEST"; do
+              image="${entry%%|*}"
+              digest="${entry#*|}"
+              if [[ -z "$digest" ]]; then
+                echo "| \`workpaw/$image\` | ⚠️ missing digest |" >&2
+                echo "| \`workpaw/$image\` | ⚠️ missing digest |"
+                failed=1
+              else
+                echo "| \`workpaw/$image\` | \`sha256:$digest\` |"
+                echo "Published workpaw/$image:$IMAGE_TAG@$digest"
+              fi
+            done
+            echo
+            echo "部署交付包引用：\`deploy.env\` 的 \`TAG=$IMAGE_TAG\`；"
+            echo "供应链加固（§7.5 digest 回填）可直接使用上表 digest。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$failed"
