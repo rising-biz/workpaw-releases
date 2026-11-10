@@ -3,9 +3,11 @@ name: Docker Hub Maintenance
 # Docker Hub 个人命名空间 docker.io/364950776 的仓库维护（发版收尾与
 # 例行清理）。四个操作，一次 dispatch 执行一个：
 #   - mirror-qwenpaw  把上游员工实例运行时镜像（agentscope/qwenpaw:X.Y.Z）
-#                     服务端复制进本命名空间（registry 侧 manifest 复制，
-#                     保留多架构、不下载任何镜像层）；实例内核随上游升级
-#                     时执行一次，之后用 publish-repos 把新仓库转 Public。
+#                     服务端复制进本命名空间的 qwenpaw 仓库（registry 侧
+#                     manifest 复制，保留多架构、不下载任何镜像层；Hub
+#                     个人命名空间只有两段，仓库名取 qwenpaw）。实例内核
+#                     随上游升级时执行一次，之后用 publish-repos 把新仓库
+#                     转 Public。
 #   - publish-repos   把仓库切换为 Public（客户节点匿名拉取的前提；自动
 #                     建库默认 Private）。
 #   - delete-tags     删除废弃 tag（如历史误发的日期 tag）。
@@ -41,7 +43,7 @@ on:
         default: 'v2.2.2'
         type: string
       repos:
-        description: 'publish-repos / delete-tags / delete-repo: repository names, comma separated, namespace omitted (agentscope/qwenpaw allowed)'
+        description: 'publish-repos / delete-tags / delete-repo: repository names, comma separated, namespace omitted (Hub personal namespaces do not allow slashes in repo names)'
         required: false
         default: ''
         type: string
@@ -70,7 +72,7 @@ env:
 jobs:
   mirror-qwenpaw:
     name: Mirror upstream qwenpaw runtime image
-    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main' && inputs.operation == 'mirror-qwenpaw'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -89,14 +91,14 @@ jobs:
           DEST_TAG: ${{ inputs.qwenpaw_dest_tag }}
         run: |
           set -euo pipefail
-          dest="${REGISTRY}/${IMAGE_NAMESPACE}/agentscope/qwenpaw:${DEST_TAG}"
+          dest="${REGISTRY}/${IMAGE_NAMESPACE}/qwenpaw:${DEST_TAG}"
           echo "Mirroring ${SOURCE} -> ${dest} (server-side manifest copy)"
           docker buildx imagetools create -t "$dest" "$SOURCE"
           docker buildx imagetools inspect "$dest"
 
   publish-repos:
     name: Switch repositories to Public
-    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main' && inputs.operation == 'publish-repos'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -167,7 +169,7 @@ jobs:
 
   delete-tags:
     name: Delete obsolete tags
-    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main' && inputs.operation == 'delete-tags'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -230,7 +232,7 @@ jobs:
 
   delete-repo:
     name: Delete obsolete repositories
-    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main' && inputs.operation == 'delete-repo'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
