@@ -141,8 +141,20 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "${REPOS// /}" ]] || { echo "repos input is required" >&2; exit 1; }
+          get_state() {
+            curl -s \
+              -H "Authorization: ${HUB_SCHEME} ${HUB_TOKEN}" \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/$1/" \
+              | jq -r '.is_private'
+          }
           rc=0
           for repo in ${REPOS//,/ }; do
+            before=$(get_state "$repo")
+            if [[ "$before" == "false" ]]; then
+              echo "${repo}: already Public"
+              continue
+            fi
+            echo "${repo}: is_private=${before} -> switching to Public"
             http=$(curl -s -o /tmp/patch.json -w '%{http_code}' -X PATCH \
               -H "Authorization: ${HUB_SCHEME} ${HUB_TOKEN}" \
               -H 'Content-Type: application/json' \
@@ -150,18 +162,24 @@ jobs:
               "https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${repo}/") || {
                 echo "${repo}: PATCH request failed" >&2; rc=1; continue; }
             if [[ "$http" != "200" ]]; then
-              echo "${repo}: PATCH returned HTTP $http: $(cat /tmp/patch.json)" >&2
-              rc=1
-              continue
+              echo "${repo}: repositories endpoint returned HTTP $http: $(cat /tmp/patch.json); trying namespaces endpoint" >&2
+              http=$(curl -s -o /tmp/patch2.json -w '%{http_code}' -X PATCH \
+                -H "Authorization: ${HUB_SCHEME} ${HUB_TOKEN}" \
+                -H 'Content-Type: application/json' \
+                -d '{"is_private": false}' \
+                "https://hub.docker.com/v2/namespaces/${IMAGE_NAMESPACE}/repositories/${repo}/") || {
+                  echo "${repo}: alternate PATCH request failed" >&2; rc=1; continue; }
+              if [[ "$http" != "200" ]]; then
+                echo "${repo}: namespaces endpoint returned HTTP $http: $(cat /tmp/patch2.json)" >&2
+                rc=1
+                continue
+              fi
             fi
-            state=$(curl -s \
-              -H "Authorization: ${HUB_SCHEME} ${HUB_TOKEN}" \
-              "https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${repo}/" \
-              | jq -r '.is_private')
-            if [[ "$state" == "false" ]]; then
+            after=$(get_state "$repo")
+            if [[ "$after" == "false" ]]; then
               echo "${repo}: Public"
             else
-              echo "${repo}: still private after PATCH (is_private=$state)" >&2
+              echo "${repo}: still private after PATCH (is_private=$after)" >&2
               rc=1
             fi
           done
