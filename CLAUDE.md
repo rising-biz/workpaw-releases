@@ -6,8 +6,9 @@ WorkPaw Desktop 的公开制品分发与自动构建编排仓库。它只包含�
 
 - `.github/workflows/build-desktop-release.yml` 只能手动从 `main` 运行，并只构建 macOS arm64、macOS x64、Windows x64 与 Linux x64/arm64（信创鲲鹏/飞腾）；运行不需要人工审批。
 - `.github/workflows/build-server-images.yml` 同样只能手动从 `main` 运行：从 `desktop-releases` Environment 读取 `WORKPAW_IMAGE_SOURCE_TOKEN` 与 `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`，把服务器镜像（workpaw-admin、workpaw-admin-console、workpaw-web、workpaw-operator，amd64+arm64）发布到 `docker.io/364950776`；绝不检出 `workpaw-desktop` 源码。
+- `.github/workflows/hub-maintenance.yml` 同样只能手动从 `main` 运行：使用同一 `desktop-releases` Environment 的 `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` 维护 `docker.io/364950776`（镜像上游 qwenpaw 实例运行时、切仓库 Public、删废弃 tag/仓库，删除要求 confirm 与仓库名逐字一致）；不检出任何源码。
 - 私有 `rising-biz/workpaw-desktop` 仅由 `desktop-releases` Environment 中最小权限的 `WORKPAW_DESKTOP_READ_TOKEN` 临时检出到 GitHub 托管运行器；服务器镜像工作流检出的 admin/web/operator 源码同样使用 Environment 中最小权限的 `WORKPAW_IMAGE_SOURCE_TOKEN`。
-- Tauri updater 私钥、私钥密码和任何 Apple 凭据只能放在 `desktop-releases` Environment；Docker Hub 推送凭据同样只能放在 `desktop-releases` Environment。禁止添加仓库级发布秘密。
+- Tauri updater 私钥、私钥密码和任何 Apple 凭据只能放在 `desktop-releases` Environment；Docker Hub 推送与仓库维护凭据同样只能放在 `desktop-releases` Environment。禁止添加仓库级发布秘密。
 - 公开 Release 只能使用本仓库的 `GITHUB_TOKEN` 写入；禁止引入跨仓库的发布写入令牌。
 - 发布前必须验证私有标签、不可变提交、版本、五个原生 manifest 条目、签名、公开 URL 和上传资产。`latest.json` 只能使用本 Release 的静态 `github.com/.../releases/download/...` URL，禁止 GitHub REST API 制品 URL，避免客户端匿名下载收到 `403`。失败只保留草稿 Release。
 - 不能通过拉取请求、推送或外部事件触发携带秘密的构建。拥有仓库写权限的人能手动触发使用 Environment 秘密的构建，必须仅限受信任发布维护者，并审查 `.github/workflows/**` 的任何改动。

@@ -1,0 +1,296 @@
+name: Docker Hub Maintenance
+
+# Docker Hub 个人命名空间 docker.io/364950776 的仓库维护（发版收尾与
+# 例行清理）。四个操作，一次 dispatch 执行一个：
+#   - mirror-qwenpaw  把上游员工实例运行时镜像（agentscope/qwenpaw:X.Y.Z）
+#                     服务端复制进本命名空间（registry 侧 manifest 复制，
+#                     保留多架构、不下载任何镜像层）；实例内核随上游升级
+#                     时执行一次，之后用 publish-repos 把新仓库转 Public。
+#   - publish-repos   把仓库切换为 Public（客户节点匿名拉取的前提；自动
+#                     建库默认 Private）。
+#   - delete-tags     删除废弃 tag（如历史误发的日期 tag）。
+#   - delete-repo     删除废弃仓库；要求 confirm 输入与 repos 逐字一致，
+#                     防手滑。删除不可恢复，运行前务必核对。
+#
+# 与 build-server-images.yml 同一安全模型：
+#   - 只允许从 main 手动 dispatch；禁止 push/PR/外部事件触发器；
+#   - Docker Hub 凭据只存在于 desktop-releases Environment（禁止仓库级
+#     秘密），每个作业都带 repository/ref 守卫；
+#   - 不检出任何源码：全部操作走 Hub REST API 与 registry manifest 接口。
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Maintenance operation to run'
+        required: true
+        type: choice
+        options:
+          - mirror-qwenpaw
+          - publish-repos
+          - delete-tags
+          - delete-repo
+      qwenpaw_source:
+        description: 'mirror-qwenpaw: upstream image reference (repo:tag)'
+        required: false
+        default: 'agentscope/qwenpaw:v2.2.2'
+        type: string
+      qwenpaw_dest_tag:
+        description: 'mirror-qwenpaw: tag to publish under the namespace'
+        required: false
+        default: 'v2.2.2'
+        type: string
+      repos:
+        description: 'publish-repos / delete-tags / delete-repo: repository names, comma separated, namespace omitted (agentscope/qwenpaw allowed)'
+        required: false
+        default: ''
+        type: string
+      tags:
+        description: 'delete-tags: tags to delete, comma separated'
+        required: false
+        default: ''
+        type: string
+      confirm:
+        description: 'delete-repo: must equal the repos input verbatim to confirm deletion'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: hub-maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAMESPACE: 364950776
+
+jobs:
+  mirror-qwenpaw:
+    name: Mirror upstream qwenpaw runtime image
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: desktop-releases
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef  # v3.7.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Copy multi-arch manifest into the namespace
+        env:
+          SOURCE: ${{ inputs.qwenpaw_source }}
+          DEST_TAG: ${{ inputs.qwenpaw_dest_tag }}
+        run: |
+          set -euo pipefail
+          dest="${REGISTRY}/${IMAGE_NAMESPACE}/agentscope/qwenpaw:${DEST_TAG}"
+          echo "Mirroring ${SOURCE} -> ${dest} (server-side manifest copy)"
+          docker buildx imagetools create -t "$dest" "$SOURCE"
+          docker buildx imagetools inspect "$dest"
+
+  publish-repos:
+    name: Switch repositories to Public
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: desktop-releases
+    steps:
+      - name: Authenticate to the Docker Hub API
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${DOCKERHUB_TOKEN}" \
+            "https://hub.docker.com/v2/user/" || true)
+          if [[ "$code" == "200" ]]; then
+            echo "HUB_TOKEN=${DOCKERHUB_TOKEN}" >> "$GITHUB_ENV"
+            echo "HUB_SCHEME=Bearer" >> "$GITHUB_ENV"
+            echo "Personal access token accepted directly by the Hub API"
+          elif [[ "$code" == "401" || "$code" == "403" ]]; then
+            # 令牌是账号口令而非 PAT 时，改走 JWT 登录取会话令牌
+            jwt=$(curl -sS -H 'Content-Type: application/json' \
+              -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
+              "https://hub.docker.com/v2/users/login/" | jq -er '.token // empty')
+            [[ -n "$jwt" ]] || {
+              echo "Hub API rejected the token both as PAT and as login credential" >&2
+              exit 1
+            }
+            echo "::add-mask::$jwt"
+            echo "HUB_TOKEN=$jwt" >> "$GITHUB_ENV"
+            echo "HUB_SCHEME=JWT" >> "$GITHUB_ENV"
+            echo "Authenticated via JWT session login"
+          else
+            echo "Unexpected response probing the Hub API: HTTP $code" >&2
+            exit 1
+          fi
+
+      - name: Switch repositories to Public
+        env:
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          [[ -n "${REPOS// /}" ]] || { echo "repos input is required" >&2; exit 1; }
+          rc=0
+          for repo in ${REPOS//,/ }; do
+            http=$(curl -s -o /tmp/patch.json -w '%{http_code}' -X PATCH \
+              -H "Authorization: ${HUB_SCHEME} ${HUB_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              -d '{"is_private": false}' \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${repo}/") || {
+                echo "${repo}: PATCH request failed" >&2; rc=1; continue; }
+            if [[ "$http" != "200" ]]; then
+              echo "${repo}: PATCH returned HTTP $http: $(cat /tmp/patch.json)" >&2
+              rc=1
+              continue
+            fi
+            state=$(curl -s \
+              -H "Authorization: ${HUB_SCHEME} ${HUB_TOKEN}" \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${repo}/" \
+              | jq -r '.is_private')
+            if [[ "$state" == "false" ]]; then
+              echo "${repo}: Public"
+            else
+              echo "${repo}: still private after PATCH (is_private=$state)" >&2
+              rc=1
+            fi
+          done
+          exit "$rc"
+
+  delete-tags:
+    name: Delete obsolete tags
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: desktop-releases
+    steps:
+      - name: Authenticate to the Docker Hub API
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${DOCKERHUB_TOKEN}" \
+            "https://hub.docker.com/v2/user/" || true)
+          if [[ "$code" == "200" ]]; then
+            echo "HUB_TOKEN=${DOCKERHUB_TOKEN}" >> "$GITHUB_ENV"
+            echo "HUB_SCHEME=Bearer" >> "$GITHUB_ENV"
+          elif [[ "$code" == "401" || "$code" == "403" ]]; then
+            jwt=$(curl -sS -H 'Content-Type: application/json' \
+              -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
+              "https://hub.docker.com/v2/users/login/" | jq -er '.token // empty')
+            [[ -n "$jwt" ]] || {
+              echo "Hub API rejected the token both as PAT and as login credential" >&2
+              exit 1
+            }
+            echo "::add-mask::$jwt"
+            echo "HUB_TOKEN=$jwt" >> "$GITHUB_ENV"
+            echo "HUB_SCHEME=JWT" >> "$GITHUB_ENV"
+          else
+            echo "Unexpected response probing the Hub API: HTTP $code" >&2
+            exit 1
+          fi
+
+      - name: Delete tags
+        env:
+          REPOS: ${{ inputs.repos }}
+          TAGS: ${{ inputs.tags }}
+        run: |
+          set -euo pipefail
+          [[ -n "${REPOS// /}" && -n "${TAGS// /}" ]] || {
+            echo "repos and tags inputs are both required" >&2; exit 1; }
+          rc=0
+          for repo in ${REPOS//,/ }; do
+            for tag in ${TAGS//,/ }; do
+              http=$(curl -s -o /tmp/resp.json -w '%{http_code}' -X DELETE \
+                -H "Authorization: ${HUB_SCHEME} ${HUB_TOKEN}" \
+                "https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${repo}/tags/${tag}/") || {
+                  echo "${repo}:${tag}: DELETE request failed" >&2; rc=1; continue; }
+              if [[ "$http" == "200" || "$http" == "204" ]]; then
+                echo "${repo}:${tag}: deleted"
+              elif [[ "$http" == "404" ]]; then
+                echo "${repo}:${tag}: already absent"
+              else
+                echo "${repo}:${tag}: DELETE returned HTTP $http: $(cat /tmp/resp.json)" >&2
+                rc=1
+              fi
+            done
+          done
+          exit "$rc"
+
+  delete-repo:
+    name: Delete obsolete repositories
+    if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: desktop-releases
+    steps:
+      - name: Authenticate to the Docker Hub API
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${DOCKERHUB_TOKEN}" \
+            "https://hub.docker.com/v2/user/" || true)
+          if [[ "$code" == "200" ]]; then
+            echo "HUB_TOKEN=${DOCKERHUB_TOKEN}" >> "$GITHUB_ENV"
+            echo "HUB_SCHEME=Bearer" >> "$GITHUB_ENV"
+          elif [[ "$code" == "401" || "$code" == "403" ]]; then
+            jwt=$(curl -sS -H 'Content-Type: application/json' \
+              -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
+              "https://hub.docker.com/v2/users/login/" | jq -er '.token // empty')
+            [[ -n "$jwt" ]] || {
+              echo "Hub API rejected the token both as PAT and as login credential" >&2
+              exit 1
+            }
+            echo "::add-mask::$jwt"
+            echo "HUB_TOKEN=$jwt" >> "$GITHUB_ENV"
+            echo "HUB_SCHEME=JWT" >> "$GITHUB_ENV"
+          else
+            echo "Unexpected response probing the Hub API: HTTP $code" >&2
+            exit 1
+          fi
+
+      - name: Delete repositories
+        env:
+          REPOS: ${{ inputs.repos }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          [[ -n "${REPOS// /}" ]] || { echo "repos input is required" >&2; exit 1; }
+          if [[ "$CONFIRM" != "$REPOS" ]]; then
+            echo "confirm input must equal the repos input verbatim to delete:" >&2
+            echo "  repos:   ${REPOS}" >&2
+            echo "  confirm: ${CONFIRM}" >&2
+            exit 1
+          fi
+          echo "Deleting repositories: ${REPOS} (irreversible)"
+          rc=0
+          for repo in ${REPOS//,/ }; do
+            http=$(curl -s -o /tmp/resp.json -w '%{http_code}' -X DELETE \
+              -H "Authorization: ${HUB_SCHEME} ${HUB_TOKEN}" \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${repo}/") || {
+                echo "${repo}: DELETE request failed" >&2; rc=1; continue; }
+            if [[ "$http" == "200" || "$http" == "202" || "$http" == "204" ]]; then
+              echo "${repo}: deleted"
+            elif [[ "$http" == "404" ]]; then
+              echo "${repo}: already absent"
+            else
+              echo "${repo}: DELETE returned HTTP $http: $(cat /tmp/resp.json)" >&2
+              rc=1
+            fi
+          done
+          exit "$rc"
