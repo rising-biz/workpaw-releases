@@ -1,9 +1,11 @@
 name: Build WorkPaw Server Images
 
-# 发版时从源码构建服务器镜像并推送到 docker.io/workpaw：
-#   workpaw-admin（API+网关镜像）、workpaw-admin-console（管理后台前端）、
-#   workpaw-web（Web 全功能端）、workpaw-operator（实例 Operator）。
-# 全部发布 linux/amd64 + linux/arm64（信创鲲鹏/飞腾）双架构 manifest。
+# 发版时从源码构建服务器镜像并推送到 Docker Hub 个人命名空间
+# docker.io/364950776（官方镜像发布处，客户 deploy.env REGISTRY 与 chart
+# 默认值均指向这里）：workpaw-admin（API+网关镜像）、workpaw-admin-console
+# （管理后台前端）、workpaw-web（Web 全功能端）、workpaw-operator（实例
+# Operator）。全部发布 linux/amd64 + linux/arm64（信创鲲鹏/飞腾）双架构
+# manifest。
 #
 # 与 build-desktop-release.yml 同一安全模型：
 #   - 只允许从 main 手动 dispatch；禁止 push/PR/外部事件触发器；
@@ -47,7 +49,7 @@ permissions:
 
 env:
   REGISTRY: docker.io
-  IMAGE_NAMESPACE: workpaw
+  IMAGE_NAMESPACE: 364950776
   # reviewed workpaw-ui commit（与 build-desktop-release.yml 同一钉版；
   # 源码仓库各自 CI 的 UI 钉版更新时一并评估）
   WORKPAW_UI_REF: 2c3bf4beee8d2ee4954ff8f958df88dfaa7d1ed0
@@ -347,6 +349,7 @@ jobs:
       - name: Verify digests and write release summary
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_NAMESPACE: ${{ env.IMAGE_NAMESPACE }}
           ADMIN_DIGEST: ${{ needs.admin-image.outputs.digest }}
           CONSOLE_DIGEST: ${{ needs.console-image.outputs.digest }}
           WEB_DIGEST: ${{ needs.web-image.outputs.digest }}
@@ -355,7 +358,7 @@ jobs:
           set -euo pipefail
           failed=0
           {
-            echo "### WorkPaw server images published to \`docker.io/workpaw\`"
+            echo "### WorkPaw server images published to \`$REGISTRY/$IMAGE_NAMESPACE\`"
             echo
             echo "Tag: \`$IMAGE_TAG\` · platforms: linux/amd64, linux/arm64"
             echo
@@ -369,12 +372,12 @@ jobs:
               image="${entry%%|*}"
               digest="${entry#*|}"
               if [[ -z "$digest" ]]; then
-                echo "| \`workpaw/$image\` | ⚠️ missing digest |" >&2
-                echo "| \`workpaw/$image\` | ⚠️ missing digest |"
+                echo "| \`$IMAGE_NAMESPACE/$image\` | ⚠️ missing digest |" >&2
+                echo "| \`$IMAGE_NAMESPACE/$image\` | ⚠️ missing digest |"
                 failed=1
               else
-                echo "| \`workpaw/$image\` | \`sha256:$digest\` |"
-                echo "Published workpaw/$image:$IMAGE_TAG@$digest"
+                echo "| \`$IMAGE_NAMESPACE/$image\` | \`sha256:$digest\` |"
+                echo "Published $IMAGE_NAMESPACE/$image:$IMAGE_TAG@$digest"
               fi
             done
             echo
