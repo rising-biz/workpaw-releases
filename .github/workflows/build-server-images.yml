@@ -3,9 +3,14 @@ name: Build WorkPaw Server Images
 # 发版时从源码构建服务器镜像并推送到 Docker Hub 个人命名空间
 # docker.io/364950776（官方镜像发布处，客户 deploy.env REGISTRY 与 chart
 # 默认值均指向这里）：workpaw-admin（API+网关镜像）、workpaw-admin-console
-# （管理后台前端）、workpaw-web（Web 全功能端）、workpaw-operator（实例
-# Operator）。全部发布 linux/amd64 + linux/arm64（信创鲲鹏/飞腾）双架构
-# manifest。
+# （管理后台前端，与 admin 同仓库同版本）、workpaw-web（Web 全功能端）、
+# workpaw-operator（实例 Operator）。全部发布 linux/amd64 + linux/arm64
+# （信创鲲鹏/飞腾）双架构 manifest。
+#
+# 版本模型：平台以 git tag vX.Y.Z 发版（admin/web/operator 三仓库联动同
+# 版本；admin-console 内嵌于 admin 仓库随其版本）。dispatch 输入 version，
+# 各仓库默认检出 refs/tags/v<version>；镜像 tag 即该版本号。ref 覆盖为
+# 分支/SHA 的高阶用法跳过 tag 校验（常规发版不使用）。
 #
 # 与 build-desktop-release.yml 同一安全模型：
 #   - 只允许从 main 手动 dispatch；禁止 push/PR/外部事件触发器；
@@ -13,35 +18,35 @@ name: Build WorkPaw Server Images
 #     Environment（禁止仓库级秘密），每个作业都带 repository/ref 守卫；
 #   - 本工作流绝不检出 workpaw-desktop 源码。
 #
-# 镜像版本溯源：admin 镜像内嵌 VERSION=git-<源码短 SHA>（workpaw-admin
-# version 命令输出）；每次发布产出四个镜像 digest，在 summary 汇总供
-# 部署交付包 §7.5 供应链加固时回填。
+# 溯源：admin 镜像内嵌 VERSION=<版本号>（workpaw-admin version 输出）；
+# 每次发布产出四个镜像 digest，在 summary 汇总供部署交付包 §7.5 供应链
+# 加固时回填。
 
 on:
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: 'Image tag to publish, for example 20261110 (matches deploy.env TAG)'
+      version:
+        description: 'Release version tag shared by admin/web/operator repos, for example v0.4.0'
         required: true
         type: string
       admin_ref:
-        description: 'workpaw-admin git ref (branch, tag or SHA)'
+        description: 'Override workpaw-admin git ref (default: the version tag)'
         required: false
-        default: 'main'
+        default: ''
         type: string
       web_ref:
-        description: 'workpaw-web git ref (branch, tag or SHA)'
+        description: 'Override workpaw-web git ref (default: the version tag)'
         required: false
-        default: 'main'
+        default: ''
         type: string
       operator_ref:
-        description: 'workpaw-operator git ref (also embedded into the admin image via go.mod replace)'
+        description: 'Override workpaw-operator git ref (default: the version tag; also embedded into the admin image via go.mod replace)'
         required: false
-        default: 'main'
+        default: ''
         type: string
 
 concurrency:
-  group: server-images-${{ inputs.image_tag }}
+  group: server-images-${{ inputs.version }}
   cancel-in-progress: false
 
 permissions:
@@ -56,23 +61,23 @@ env:
 
 jobs:
   preflight:
-    name: Validate inputs and release secrets
+    name: Validate release inputs and secrets
     if: github.repository == 'rising-biz/workpaw-releases' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
       name: desktop-releases
     steps:
-      - name: Validate image tag and required Environment secrets
+      - name: Validate version and required Environment secrets
         env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          VERSION: ${{ inputs.version }}
           WORKPAW_IMAGE_SOURCE_TOKEN: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "image_tag must be a valid Docker tag (letters/digits/._-, up to 128 chars), received: $IMAGE_TAG" >&2
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "version must match vX.Y.Z[-prerelease], received: $VERSION" >&2
             exit 1
           fi
           for name in WORKPAW_IMAGE_SOURCE_TOKEN DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
@@ -81,7 +86,7 @@ jobs:
               exit 1
             fi
           done
-          echo "image_tag=$IMAGE_TAG; required desktop-releases Environment secrets present."
+          echo "version=$VERSION; required desktop-releases Environment secrets present."
 
   admin-image:
     name: workpaw-admin image
@@ -93,36 +98,54 @@ jobs:
       name: desktop-releases
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+    env:
+      VERSION: ${{ inputs.version }}
+      ADMIN_REF: ${{ inputs.admin_ref || format('v{0}', inputs.version) }}
     steps:
       - name: Check out workpaw-admin
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: rising-biz/workpaw-admin
-          ref: ${{ inputs.admin_ref }}
+          ref: ${{ env.ADMIN_REF }}
           token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
           persist-credentials: false
           path: workpaw-admin
 
       # workpaw-admin/Dockerfile builds from the workspace root: this sibling
       # checkout satisfies go.mod `replace => ../workpaw-operator`. If admin
-      # main and operator main have drifted apart, this build fails loudly;
+      # and operator mains have drifted apart, this build fails loudly;
       # re-dispatch with matching explicit refs.
       - name: Check out workpaw-operator (sibling module)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: rising-biz/workpaw-operator
-          ref: ${{ inputs.operator_ref }}
+          ref: ${{ inputs.operator_ref || format('v{0}', inputs.version) }}
           token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
           persist-credentials: false
           path: workpaw-operator
 
-      - name: Resolve admin image version label
+      # 常规发版（ref 即版本 tag）时锁定 provenance：检出的提交必须恰好
+      # 携带该 tag，防止 tag 与镜像内容漂移。
+      - name: Verify release tag on checked-out commit
         working-directory: workpaw-admin
         run: |
           set -euo pipefail
-          VERSION="git-$(git rev-parse --short=12 HEAD)"
+          if [[ "$ADMIN_REF" == "$VERSION" ]]; then
+            got="$(git describe --tags --exact-match HEAD)"
+            [ "$got" = "$VERSION" ] || {
+              echo "Ref $ADMIN_REF does not carry tag $VERSION (describe: $got)" >&2
+              exit 1
+            }
+            echo "workpaw-admin at $VERSION ✓"
+          fi
+
+      # VERSION is injected into cmd.Version and printed by
+      # `workpaw-admin version`; bounded by the Dockerfile validation.
+      - name: Publish admin image
+        working-directory: workpaw-admin
+        run: |
+          set -euo pipefail
           [ "${#VERSION}" -le 32 ] || { echo "VERSION exceeds 32 bytes: $VERSION" >&2; exit 1; }
-          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_ENV"
           echo "Admin image version label: $VERSION"
 
       # The Go build stage stays on $BUILDPLATFORM (cross-compile, no
@@ -148,7 +171,7 @@ jobs:
           file: workpaw-admin/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-admin:${{ inputs.image_tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-admin:${{ inputs.version }}
           build-args: |
             VERSION=${{ env.VERSION }}
           cache-from: type=gha
@@ -164,12 +187,15 @@ jobs:
       name: desktop-releases
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+    env:
+      VERSION: ${{ inputs.version }}
+      ADMIN_REF: ${{ inputs.admin_ref || format('v{0}', inputs.version) }}
     steps:
       - name: Check out workpaw-admin
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: rising-biz/workpaw-admin
-          ref: ${{ inputs.admin_ref }}
+          ref: ${{ env.ADMIN_REF }}
           token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
           persist-credentials: false
           path: workpaw-admin
@@ -186,6 +212,19 @@ jobs:
           ref: ${{ env.WORKPAW_UI_REF }}
           persist-credentials: false
           path: workpaw-ui
+
+      - name: Verify release tag on checked-out commit
+        working-directory: workpaw-admin
+        run: |
+          set -euo pipefail
+          if [[ "$ADMIN_REF" == "$VERSION" ]]; then
+            got="$(git describe --tags --exact-match HEAD)"
+            [ "$got" = "$VERSION" ] || {
+              echo "Ref $ADMIN_REF does not carry tag $VERSION (describe: $got)" >&2
+              exit 1
+            }
+            echo "workpaw-admin at $VERSION ✓"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -207,7 +246,7 @@ jobs:
           file: workpaw-admin/console/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-admin-console:${{ inputs.image_tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-admin-console:${{ inputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -221,12 +260,15 @@ jobs:
       name: desktop-releases
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+    env:
+      VERSION: ${{ inputs.version }}
+      WEB_REF: ${{ inputs.web_ref || format('v{0}', inputs.version) }}
     steps:
       - name: Check out workpaw-web
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: rising-biz/workpaw-web
-          ref: ${{ inputs.web_ref }}
+          ref: ${{ env.WEB_REF }}
           token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
           persist-credentials: false
           path: workpaw-web
@@ -241,6 +283,19 @@ jobs:
           ref: ${{ env.WORKPAW_UI_REF }}
           persist-credentials: false
           path: workpaw-ui
+
+      - name: Verify release tag on checked-out commit
+        working-directory: workpaw-web
+        run: |
+          set -euo pipefail
+          if [[ "$WEB_REF" == "$VERSION" ]]; then
+            got="$(git describe --tags --exact-match HEAD)"
+            [ "$got" = "$VERSION" ] || {
+              echo "Ref $WEB_REF does not carry tag $VERSION (describe: $got)" >&2
+              exit 1
+            }
+            echo "workpaw-web at $VERSION ✓"
+          fi
 
       - name: Install pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -291,7 +346,7 @@ jobs:
           file: workpaw-web/Dockerfile.release
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-web:${{ inputs.image_tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-web:${{ inputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -305,15 +360,31 @@ jobs:
       name: desktop-releases
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+    env:
+      VERSION: ${{ inputs.version }}
+      OPERATOR_REF: ${{ inputs.operator_ref || format('v{0}', inputs.version) }}
     steps:
       - name: Check out workpaw-operator
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: rising-biz/workpaw-operator
-          ref: ${{ inputs.operator_ref }}
+          ref: ${{ env.OPERATOR_REF }}
           token: ${{ secrets.WORKPAW_IMAGE_SOURCE_TOKEN }}
           persist-credentials: false
           path: workpaw-operator
+
+      - name: Verify release tag on checked-out commit
+        working-directory: workpaw-operator
+        run: |
+          set -euo pipefail
+          if [[ "$OPERATOR_REF" == "$VERSION" ]]; then
+            got="$(git describe --tags --exact-match HEAD)"
+            [ "$got" = "$VERSION" ] || {
+              echo "Ref $OPERATOR_REF does not carry tag $VERSION (describe: $got)" >&2
+              exit 1
+            }
+            echo "workpaw-operator at $VERSION ✓"
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -335,7 +406,7 @@ jobs:
           file: workpaw-operator/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-operator:${{ inputs.image_tag }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/workpaw-operator:${{ inputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -348,7 +419,7 @@ jobs:
     steps:
       - name: Verify digests and write release summary
         env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
+          VERSION: ${{ inputs.version }}
           IMAGE_NAMESPACE: ${{ env.IMAGE_NAMESPACE }}
           ADMIN_DIGEST: ${{ needs.admin-image.outputs.digest }}
           CONSOLE_DIGEST: ${{ needs.console-image.outputs.digest }}
@@ -360,7 +431,7 @@ jobs:
           {
             echo "### WorkPaw server images published to \`$REGISTRY/$IMAGE_NAMESPACE\`"
             echo
-            echo "Tag: \`$IMAGE_TAG\` · platforms: linux/amd64, linux/arm64"
+            echo "Version: \`$VERSION\` · platforms: linux/amd64, linux/arm64"
             echo
             echo "| Image | Digest |"
             echo "|---|---|"
@@ -377,11 +448,11 @@ jobs:
                 failed=1
               else
                 echo "| \`$IMAGE_NAMESPACE/$image\` | \`sha256:$digest\` |"
-                echo "Published $IMAGE_NAMESPACE/$image:$IMAGE_TAG@$digest"
+                echo "Published $IMAGE_NAMESPACE/$image:$VERSION@$digest"
               fi
             done
             echo
-            echo "部署交付包引用：\`deploy.env\` 的 \`TAG=$IMAGE_TAG\`；"
+            echo "部署交付包引用：\`deploy.env\` 的 \`TAG=$VERSION\`；"
             echo "供应链加固（§7.5 digest 回填）可直接使用上表 digest。"
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$failed"
