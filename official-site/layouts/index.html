@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0B1F14">
   <title>{{ .Title }}</title>
   <meta name="description" content="WorkPaw 是企业级私有化、多用户的 AI 智能体平台：部署在您自己的 Kubernetes 集群，员工独立实例、数据隔离、全程可审计。提供 macOS / Windows / Linux 桌面客户端下载。">
   <link rel="icon" href="favicon.ico?v={{ getenv "WORKPAW_VERSION" | default "dev" }}">
@@ -16,9 +17,11 @@
         <span>WorkPaw</span>
       </a>
       <nav aria-label="页面导航">
-        <a href="#features">产品特性</a>
+        <a href="#product">产品</a>
+        <a href="#features">特性</a>
         <a href="#download">下载</a>
       </nav>
+      <a class="btn btn-primary btn-small" href="#download">下载</a>
     </div>
   </header>
 
@@ -26,62 +29,201 @@
     {{ $data := hugo.Data.downloads }}
     {{ $labels := dict "macos" "macOS" "windows" "Windows" "linux-x64" "Linux x64" "linux-arm64" "Linux ARM64（信创）" }}
 
-    <!-- 首屏：只有标题、导语与动作，无装饰 -->
+    <!-- 首屏：深绿渐变 + 爪印母题，一屏内完成 kicker/主标/副标/胶囊/CTA -->
     <section class="hero">
-      <div class="container">
-        <h1>企业级私有化 AI 智能体平台</h1>
-        <p class="hero-lead">WorkPaw 把 AI 助手装进您自己的 Kubernetes 集群——每位员工一个独立实例，数据不出企业，操作全程可审计。</p>
-        <div class="hero-actions">
-          <a id="cta-download" class="btn" href="#download">下载桌面版</a>
-          <a class="btn-ghost" href="#product">了解 WorkPaw</a>
+      <img class="paw paw-hero-tr" src="img/paw-white-faint.png?v={{ getenv "WORKPAW_VERSION" | default "dev" }}" alt="" aria-hidden="true">
+      <img class="paw paw-hero-bl" src="img/paw-white-faint.png?v={{ getenv "WORKPAW_VERSION" | default "dev" }}" alt="" aria-hidden="true">
+      <div class="container hero-inner">
+        <div class="hero-copy">
+          <p class="kicker">WorkPaw</p>
+          <h1>企业级 AI 智能体平台</h1>
+          <p class="hero-sub">为每一位员工，配一位安全可控的 AI 办公搭子</p>
+          <ul class="hero-chips">
+            <li>私有化 K8s 部署</li>
+            <li>每员工独立实例</li>
+            <li>插件化业务平台</li>
+            <li>开放智能体市场</li>
+          </ul>
+          <div class="hero-actions">
+            <a id="cta-download" class="btn btn-primary" href="#download">下载 WorkPaw Desktop</a>
+            <a class="btn btn-ghost" href="#product">了解 WorkPaw</a>
+          </div>
         </div>
-        <p class="hero-version">当前版本 v{{ $data.version }} · {{ $data.published_date }}</p>
+        <div class="hero-logo">
+          <img src="logo.png?v={{ getenv "WORKPAW_VERSION" | default "dev" }}" alt="WorkPaw 标志" width="120" height="120">
+        </div>
       </div>
     </section>
 
-    <section id="product">
+    <!-- 产品定位：左定位句 + 右 2×2 四支柱（PPT S4 构图），底部结论带 -->
+    <section id="product" class="section section-pale">
+      <img class="paw paw-product" src="img/paw-green-faint.png?v={{ getenv "WORKPAW_VERSION" | default "dev" }}" alt="" aria-hidden="true">
       <div class="container">
         <h2>WorkPaw 是什么</h2>
-        <p class="section-lead">一套平台，服务三类角色，共享同一套品牌与信任契约。</p>
-        <dl class="roles">
-          <div class="role">
-            <dt>员工</dt>
-            <dd>日常使用 AI 助手完成工作——桌面客户端与 Web 应用，SSO 登录后即可对话、管理文件、审批流程。</dd>
+        <div class="product-grid">
+          <div class="product-copy">
+            <p class="positioning">让每家企业把智能体跑在<span class="em-green">自己的 Kubernetes 集群</span>里</p>
+            <p>每位员工一个独立实例，数据不出企业，操作全程可审计。</p>
+            <p>员工获得一位随取随用的 AI 办公搭子；企业获得插件平台、开放市场与完整治理体系。</p>
+            <ul class="role-chips" aria-label="三类角色">
+              <li><strong>员工</strong> · 对话 · 文件 · 审批</li>
+              <li><strong>配置者</strong> · Agent · 技能 · 模型</li>
+              <li><strong>管理员</strong> · 治理 · 审计 · 策略</li>
+            </ul>
           </div>
-          <div class="role">
-            <dt>配置者</dt>
-            <dd>配置 Agent、技能、模型与渠道集成。低频但关键：配好一次，全员受益。</dd>
+          <div class="pillars">
+            <div class="pillar">
+              <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg></span>
+              <h3>私有化部署</h3>
+              <p>全栈容器化，交付到企业自有 K8s 集群。</p>
+            </div>
+            <div class="pillar">
+              <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M13 7h4M7 17h4" stroke-dasharray="2 2.4"/></svg></span>
+              <h3>架构级数据隔离</h3>
+              <p>每员工独立实例与专属存储卷。</p>
+            </div>
+            <div class="pillar">
+              <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="6" cy="6" r="2.6"/><circle cx="18" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><circle cx="18" cy="18" r="2.6"/></svg></span>
+              <h3>开放智能体生态</h3>
+              <p>插件承载业务，市场流通资产。</p>
+            </div>
+            <div class="pillar">
+              <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3v4.2M12 16.8V21M3 12h4.2M16.8 12H21"/></svg></span>
+              <h3>模型自主可控</h3>
+              <p>主流大模型渠道企业自选自管。</p>
+            </div>
           </div>
-          <div class="role">
-            <dt>管理员</dt>
-            <dd>治理全部用户实例的生命周期、资源用量、审计日志、全局策略与 OIDC 连接。</dd>
-          </div>
-        </dl>
+        </div>
+        <p class="conclusion-band">办公搭子不是聊天窗口，而是 7×24 在线、可审计、可治理的组织能力底座</p>
       </div>
     </section>
 
-    <section id="features">
+    <!-- 企业特性：六能力卡 2×3（PPT S10 风格，编号圆承载节奏） -->
+    <section id="features" class="section">
       <div class="container">
         <h2>为企业而生</h2>
-        <ul class="features">
-          <li><strong>私有化部署</strong>——部署在企业自己的 Kubernetes 集群，Helm 一键安装，数据不出内网。</li>
-          <li><strong>多用户隔离</strong>——每位员工独立容器实例，数据隔离在各自的持久卷中。</li>
-          <li><strong>企业身份集成</strong>——对接企业 SSO / OIDC，员工用现有账号直接登录。</li>
-          <li><strong>全程可审计</strong>——全平台实例状态与操作轨迹，管理员一览无余。</li>
-          <li><strong>全平台桌面端</strong>——macOS（Apple Silicon / Intel）、Windows、Linux x64 与 ARM64（鲲鹏 / 飞腾）。</li>
-        </ul>
+        <p class="section-lead">统一管控：看得见、管得住、可审计。</p>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="num" aria-hidden="true">01</span>
+            <h3>组织与权限</h3>
+            <p>内置职责角色体系，部门路径批量授权，权限门禁细化到路由。</p>
+          </article>
+          <article class="feature-card">
+            <span class="num" aria-hidden="true">02</span>
+            <h3>单点登录</h3>
+            <p>标准 OIDC 对接企业 IdP，角色自动映射，员工用现有账号直接登录。</p>
+          </article>
+          <article class="feature-card">
+            <span class="num" aria-hidden="true">03</span>
+            <h3>企业策略</h3>
+            <p>强制 SSO、实例规格基线、镜像白名单、空闲与定时启停，全局策略一处配置。</p>
+          </article>
+          <article class="feature-card">
+            <span class="num" aria-hidden="true">04</span>
+            <h3>配置下发</h3>
+            <p>策略变更自动收敛到每个实例，漂移自愈，失败可重试、可追溯。</p>
+          </article>
+          <article class="feature-card">
+            <span class="num" aria-hidden="true">05</span>
+            <h3>实例与用量</h3>
+            <p>每员工独立实例即点即用；Token 用量到人到实例，成本可视可归因。</p>
+          </article>
+          <article class="feature-card">
+            <span class="num" aria-hidden="true">06</span>
+            <h3>审计合规</h3>
+            <p>关键操作全留痕，全平台实例状态与操作轨迹，管理员一览无余。</p>
+          </article>
+        </div>
       </div>
     </section>
 
-    <section id="download">
+    <!-- 业务价值带：四枚大数字（PPT S14 精简） -->
+    <section class="section section-value">
+      <div class="container">
+        <h2>业务价值</h2>
+        <div class="value-grid">
+          <div class="stat">
+            <span class="stat-num">5 分钟</span>
+            <span class="stat-cap">员工从 SSO 登录到开始对话</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num">秒级</span>
+            <span class="stat-cap">实例即点即用</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num">7×24</span>
+            <span class="stat-cap">定时任务让搭子主动干活</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num">0 出域</span>
+            <span class="stat-cap">数据留在企业自己的集群</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 对比表：PPT S15 精简为 5 行 -->
+    <section class="section">
+      <div class="container">
+        <h2>为什么选择 WorkPaw</h2>
+        <p class="section-lead">品质对标一线职场 AI 工作台的体验标准，以私有化架构与开放生态，把选择权交还企业。</p>
+        <div class="compare-wrap">
+          <table class="compare-table">
+            <thead>
+              <tr>
+                <th scope="col" class="col-dim">对比维度</th>
+                <th scope="col" class="col-saas">公有云 AI 办公 SaaS</th>
+                <th scope="col" class="col-wp">WorkPaw</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">数据主权</th>
+                <td class="cell-saas">数据处理于厂商云端租户</td>
+                <td class="cell-wp"><span class="tick" aria-hidden="true">✓</span>全私有化部署，数据不出企业边界</td>
+              </tr>
+              <tr>
+                <th scope="row">隔离模型</th>
+                <td class="cell-saas">逻辑多租户共享基础设施</td>
+                <td class="cell-wp"><span class="tick" aria-hidden="true">✓</span>每员工独立实例与存储，架构级隔离</td>
+              </tr>
+              <tr>
+                <th scope="row">模型供给</th>
+                <td class="cell-saas">平台绑定的模型服务</td>
+                <td class="cell-wp"><span class="tick" aria-hidden="true">✓</span>主流模型全渠道，企业自选自管</td>
+              </tr>
+              <tr>
+                <th scope="row">能力生态</th>
+                <td class="cell-saas">平台方主导的封闭功能集</td>
+                <td class="cell-wp"><span class="tick" aria-hidden="true">✓</span>插件平台 + 开放市场，业务沉淀为可复用资产</td>
+              </tr>
+              <tr>
+                <th scope="row">信创路径</th>
+                <td class="cell-saas">依赖厂商适配节奏</td>
+                <td class="cell-wp"><span class="tick" aria-hidden="true">✓</span>Linux ARM64（鲲鹏 / 飞腾）与国产数据库适配就绪</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 下载区：机制一字不动，只重描视觉 -->
+    <section id="download" class="section section-download">
       <div class="container">
         <h2>下载 WorkPaw Desktop</h2>
-        <p class="section-lead">当前版本 v{{ $data.version }}，五平台安装包，SHA-256 校验值随包公布。</p>
+        <p class="dl-version">v{{ $data.version }}</p>
+        <p class="dl-sub">发布于 {{ $data.published_date }} · 五平台安装包，SHA-256 校验值随包公布</p>
+        <p class="dl-platforms">macOS（Apple Silicon / Intel）· Windows · Linux x64 / ARM64（鲲鹏 / 飞腾）</p>
 
         <div class="platforms">
           {{ range $p := $data.platforms }}
           <div class="platform" data-platform="{{ $p.id }}">
-            <h3>{{ index $labels $p.id }}</h3>
+            <div class="platform-head">
+              <h3>{{ index $labels $p.id }}</h3>
+              <span class="platform-count">{{ len $p.files }} 个安装包</span>
+            </div>
             <ul class="files">
               {{ range $f := $p.files }}
               <li>
@@ -110,6 +252,17 @@
           <p class="manifest">全部校验值：<a href="{{ printf "%sdownload/%s/manifest.tsv" .Site.BaseURL $data.tag }}">manifest.tsv</a></p>
           <p class="alt-channel">无法直连？前往 GitHub Releases 下载 → <a href="https://github.com/rising-biz/workpaw-releases/releases/latest">https://github.com/rising-biz/workpaw-releases/releases/latest</a></p>
         </div>
+      </div>
+    </section>
+
+    <!-- 收尾段：深绿渐变复用 Hero 背景法，不放三步行动卡 -->
+    <section class="closing">
+      <img class="paw paw-closing" src="img/paw-white-faint.png?v={{ getenv "WORKPAW_VERSION" | default "dev" }}" alt="" aria-hidden="true">
+      <div class="container closing-inner">
+        <img class="closing-logo" src="logo.png?v={{ getenv "WORKPAW_VERSION" | default "dev" }}" alt="WorkPaw 标志" width="88" height="88">
+        <p class="closing-name">WorkPaw</p>
+        <p class="closing-tag">为每一位员工，配一位安全可控的 AI 办公搭子</p>
+        <a class="btn btn-primary" href="#download">下载 WorkPaw Desktop</a>
       </div>
     </section>
   </main>

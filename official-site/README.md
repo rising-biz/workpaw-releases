@@ -1,8 +1,8 @@
 # WorkPaw 官网（official-site）
 
-Hugo 单页静态官网：产品定位、特性、五平台下载区（安装包镜像直链 + SHA-256
-校验值）。页面与安装包全量托管在腾讯云 COS 公有读桶，无 VM、无 nginx、无
-自建域名，入口恒定：
+Hugo 单页静态官网：深绿渐变 Hero、产品定位、企业特性、业务价值、SaaS 对比、
+五平台下载区（安装包镜像直链 + SHA-256 校验值）与收尾段。页面与安装包全量
+托管在腾讯云 COS 公有读桶，无 VM、无 nginx、无自建域名，入口恒定：
 
 ```
 https://workpaw-1253566621.cos.ap-guangzhou.myqcloud.com/index.html
