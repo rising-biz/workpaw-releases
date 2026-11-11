@@ -143,12 +143,12 @@ if [[ "$SAMPLE" -eq 1 ]]; then
   MANIFEST_ARG="-"
 else
   # ---------------------------------------------------------- 下载安装包 --
-  # downloads.list 每行「安装包名 下载地址」，并发 4 路拉取；
+  # downloads.list 每行「安装包名 下载地址」，并发 10 路拉取；
   # -C - 使已存在的完整文件成为空操作、被中断的文件可断点续传（重跑即续传）。
   EXPECTED="$(wc -l < "$DOWNLOADS_LIST")"
   mkdir -p "$INSTALLERS_DIR"
   echo "==> 下载 $EXPECTED 件安装包到 $INSTALLERS_DIR …" >&2
-  if ! xargs -P 4 -I{} bash -c \
+  if ! xargs -P 10 -I{} bash -c \
       'name=${1%% *}; url=${1#* }; curl -fL --retry 3 -C - -o "$0/installers/$name" "$url"' \
       "$CACHE_ROOT" {} < "$DOWNLOADS_LIST"; then
     echo "错误：安装包下载失败（直接重跑本脚本即可断点续传）。" >&2
