@@ -1,4 +1,4 @@
-/* WorkPaw 官网基础样式：翠微同源色彩令牌 + 版式基座（内容区块由后续任务填实） */
+/* WorkPaw 官网样式：翠微同源色彩令牌 + 单页版式（工具感优先，无装饰） */
 
 :root {
   --bg: oklch(0.965 0.012 160);
@@ -38,6 +38,10 @@ a {
 a:hover { text-decoration-thickness: 2px; }
 
 img { max-width: 100%; height: auto; }
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
 
 /* 内容容器：留白充足，窄屏自适应 */
 .container {
@@ -89,7 +93,63 @@ img { max-width: 100%; height: auto; }
   text-decoration: underline;
 }
 
-/* 区块骨架：统一纵向节奏 */
+/* 首屏：只有标题、导语、动作与版本行，无营销式装饰 */
+.hero {
+  padding: 120px 0 104px;
+}
+.hero h1 {
+  margin: 0 0 20px;
+  color: var(--primary);
+  font-size: clamp(32px, 6vw, 46px);
+  line-height: 1.22;
+  letter-spacing: 0.01em;
+}
+.hero-lead {
+  margin: 0 0 32px;
+  max-width: 720px;
+  font-size: 19px;
+  line-height: 1.85;
+}
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+}
+.hero-version {
+  margin: 24px 0 0;
+  font-size: 14px;
+  opacity: 0.75;
+}
+
+/* 按钮：主按钮白字压 --primary（大字对比 ≥3.0），次按钮描边 */
+.btn {
+  display: inline-block;
+  padding: 10px 24px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 17px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.btn:hover {
+  background: var(--primary-text);
+  border-color: var(--primary-text);
+}
+.btn-ghost {
+  display: inline-block;
+  padding: 10px 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--primary-text);
+  font-size: 17px;
+  text-decoration: none;
+}
+.btn-ghost:hover { border-color: var(--primary-text); }
+
+/* 区块：统一纵向节奏 */
 main section {
   padding: 88px 0;
 }
@@ -98,6 +158,7 @@ main section + section {
 }
 main section h2 {
   margin: 0 0 16px;
+  color: var(--primary);
   font-size: 30px;
   line-height: 1.3;
   letter-spacing: 0.01em;
@@ -109,6 +170,134 @@ main section .section-lead {
   opacity: 0.82;
 }
 
+/* 三类角色：规格表式行排布（左角色名、右职责），非卡片网格 */
+.roles {
+  margin: 44px 0 0;
+}
+.role {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 4px 36px;
+  padding: 22px 0;
+  border-top: 1px solid var(--border);
+}
+.role dt {
+  margin: 0;
+  font-weight: 600;
+}
+.role dd {
+  margin: 0;
+  max-width: 640px;
+}
+
+/* 特性清单：逐行陈述，细线分隔 */
+.features {
+  margin: 44px 0 0;
+  padding: 0;
+  max-width: 760px;
+  list-style: none;
+}
+.features li {
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+}
+.features strong { font-weight: 600; }
+
+/* 下载区：平台组纵向排列，组内逐文件一行 */
+.platforms {
+  margin-top: 48px;
+}
+.platform {
+  padding: 36px 0 20px;
+  border-top: 1px solid var(--border);
+}
+.platform h3 {
+  margin: 0 0 6px;
+  font-size: 21px;
+  line-height: 1.4;
+}
+/* JS 命中当前系统时的高亮边框（唯一由脚本驱动的状态） */
+.platform.recommended {
+  margin-top: 28px;
+  padding: 26px 26px 14px;
+  background: var(--surface);
+  border: 1px solid var(--primary);
+  border-radius: 10px;
+}
+.files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.files li {
+  padding: 12px 0;
+}
+.files li + li {
+  border-top: 1px dashed var(--border);
+}
+.file-line {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 18px;
+}
+.file-name {
+  font-weight: 600;
+}
+.file-meta {
+  font-size: 14px;
+  opacity: 0.75;
+}
+/* 校验值：原生 details 折叠，零 JS */
+.file-sha {
+  margin: 4px 0 0;
+}
+.file-sha summary {
+  cursor: pointer;
+  color: var(--primary-text);
+  font-size: 14px;
+}
+.file-sha summary:hover { text-decoration: underline; }
+.file-sha code {
+  display: block;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+/* 平台提示（macOS 公证 / Windows SmartScreen）与下载区尾注 */
+.note {
+  margin: 14px 0 0;
+  max-width: 640px;
+  font-size: 14px;
+  opacity: 0.75;
+}
+.note code {
+  padding: 1px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 13px;
+  word-break: break-all;
+}
+.dl-footnotes {
+  margin-top: 8px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.manifest,
+.alt-channel { margin: 0; }
+.alt-channel {
+  margin-top: 8px;
+  font-size: 15px;
+}
+
 /* 页脚 */
 footer {
   border-top: 1px solid var(--border);
@@ -116,15 +305,30 @@ footer {
   padding: 32px 0;
   font-size: 15px;
 }
+.footer-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 24px;
+}
 
 /* 克制动线：仅细碎过渡，尊重系统减弱动效偏好 */
 @media (prefers-reduced-motion: no-preference) {
   a, .topbar nav a { transition: color 0.15s ease; }
+  .btn, .btn-ghost { transition: background-color 0.15s ease, border-color 0.15s ease; }
 }
 
 /* 窄屏：收紧留白与标题层级 */
 @media (max-width: 640px) {
   main section { padding: 64px 0; }
   main section h2 { font-size: 25px; }
+  .hero { padding: 72px 0 64px; }
+  .role { grid-template-columns: 1fr; gap: 0; }
+  .platform { padding: 28px 0 12px; }
+  .platform.recommended {
+    margin-top: 20px;
+    padding: 18px 16px 10px;
+  }
   .topbar-inner { flex-wrap: wrap; padding-top: 10px; padding-bottom: 10px; }
 }
