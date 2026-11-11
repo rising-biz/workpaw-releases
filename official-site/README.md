@@ -25,7 +25,7 @@ curl -fsSL -o "/tmp/hugo_${HUGO_VERSION}_linux-amd64.tar.gz" \
 curl -fsSL -o /tmp/hugo-checksums.txt \
   "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_${HUGO_VERSION}_checksums.txt"
 grep "hugo_${HUGO_VERSION}_linux-amd64.tar.gz" /tmp/hugo-checksums.txt | (cd /tmp && sha256sum -c -)
-tar -xzf "/tmp/hugo_${HUGO_VERSION}_linux-amd64.tar.gz" hugo -C /tmp && export PATH="/tmp:$PATH"   # macOS 换 linux-amd64 为 macos-*
+tar -xzf "/tmp/hugo_${HUGO_VERSION}_linux-amd64.tar.gz" -C /tmp hugo && export PATH="/tmp:$PATH"   # macOS 装 hugo_0.169.0_darwin-universal.pkg 后 hugo 已在 PATH，无需此行
 
 # 2. 生成示例数据：只拉 release 元数据，sha256 以占位符呈现，不下载安装包
 official-site/scripts/build-data.sh --sample
@@ -34,33 +34,47 @@ official-site/scripts/build-data.sh --sample
 hugo -s official-site --serve
 ```
 
-两个脚本的头注释是权威文档：
+三个脚本的头注释是权威文档：
 
-- `scripts/build-data.sh` —— 数据管线：拉最新正式 release 元数据、按
-  10 个选择器归类安装包、生成 `data/downloads.json` 与 `manifest.tsv`
-  （`sha256<TAB>size<TAB>name`，无表头）；stdout 末行输出
-  `WORKPAW_VERSION=<version>` 供部署编排注入
-- `scripts/deploy.sh` —— 部署编排：数据管线 → 安装包上传 `download/<tag>/`
-  → 版本轮换 → Hugo 构建 → 页面对象上传桶根
+- `scripts/build-data.sh` —— 唯一事实源：拉最新正式 release 元数据、按
+  10 个选择器归类安装包（sha256 取 GitHub `digest` 字段）、生成
+  `data/downloads.json` 与 `manifest.tsv`（`sha256<TAB>size<TAB>name`，无表头）；
+  零下载，stdout 末行输出 `WORKPAW_VERSION=<version>` 供部署编排注入
+- `scripts/mirror-installers.sh` —— 字节搬运工（发版仪式在国内机跑）：读
+  `downloads.json` 为工单拉 10 件安装包、本地 sha256 对账 GitHub digest 后
+  直传 `download/<tag>/`（含 manifest.tsv，幂等可断点续传）；stdout 末行输出
+  `MIRRORED=<tag>` 供仪式脚本化校验
+- `scripts/deploy.sh` —— 页面发布器：核验 COS 安装包已就位 → 版本轮换 →
+  Hugo 构建 → 页面对象上传桶根；零大文件
 
 ## 二、发布
 
-官网版本**自动跟随最新正式 release**，仓库内无版本号硬编码。每次 desktop
-发版（GitHub Release 转正式、注册进 Keygate）之后，手动触发一次部署：
+官网版本**自动跟随最新正式 release**，仓库内无版本号硬编码。安装包字节不
+经过 CI（runner 跨境传 COS 在物理上不可行）——每次 desktop 发版走四步仪式：
 
-```bash
-gh workflow run deploy-official-site -R rising-biz/workpaw-releases
-```
+1. **GitHub 出货**：desktop 构建工作流产出签名安装包，Release 转正式；
+2. **注册 Keygate**：更新链路登记本 Release 的 `latest.json` 与更新包；
+3. **安装包镜像（国内机）**：跑 `official-site/scripts/mirror-installers.sh`，
+   以 `downloads.json` 工单拉 10 件安装包、本地 sha256 对账 GitHub 服务端
+   digest 后直传 COS `download/<tag>/`（幂等、断点续传，重跑即续传）；
+4. **发布页面**：
+
+   ```bash
+   gh workflow run deploy-official-site -R rising-biz/workpaw-releases
+   ```
+
+   安装包必须先由第 3 步就位，工作流只做元数据与页面，缺任一安装包即失败。
 
 工作流（`.github/workflows/deploy-official-site.yml`：仅手动、仅 main、
-`desktop-releases` Environment、hugo 版本固定并用官方 checksums 校验）
-依次执行：拉最新 release 元数据 → 下载 10 件安装包并逐件算 sha256、核对
-大小 → 上传到 `download/<tag>/` 并轮换旧版本 → Hugo 构建（注入版本号）
-→ 页面对象上传桶根。跑完即生效，入口 URL 恒定不变。
+`desktop-releases` Environment、hugo 版本固定并用官方 checksums 校验、
+timeout 15 分钟）依次执行：拉最新 release 元数据（sha256 取 GitHub `digest`
+字段）→ 核验 `download/<tag>/` 已由 mirror-installers.sh 就位 → 轮换旧版本 →
+Hugo 构建（注入版本号）→ 页面对象上传桶根。全程秒级，跑完即生效，入口 URL
+恒定不变。
 
 配置好 rclone 环境变量后，本地执行 `official-site/scripts/deploy.sh` 可
 复现同一流程（`KEEP`/`COS_REMOTE`/`COS_PUBLIC_BASE` 等环境变量见脚本头
-注释）。
+注释；同样要求安装包已先由 mirror-installers.sh 就位）。
 
 ## 三、密钥
 
@@ -72,19 +86,22 @@ COS 凭据只放在 GitHub `desktop-releases` Environment（与其他发布秘�
 - `COS_SECRET_ACCESS_KEY`（腾讯云 SecretKey）
 
 工作流把凭据以 rclone 环境变量注入（`RCLONE_CONFIG_COS_ACCESS_KEY_ID`
-等），不入库、不入日志；建议使用仅授权本桶的子账号密钥。本地手动跑时
-同样只用环境变量提供，不要写进任何文件或 shell 历史。
+等），不入库、不入日志；国内机跑 `mirror-installers.sh` 时导出同款
+`RCLONE_CONFIG_COS_*` 变量（变量名与工作流一致）；建议使用仅授权本桶的
+子账号密钥。本地手动跑时同样只用环境变量提供，不要写进任何文件或 shell
+历史。
 
 ## 四、上传边界
 
-脚本只写两类对象，此外一个对象都不写：
+两个脚本合计只写两类对象，此外一个对象都不写：
 
 - **页面对象**（桶根 `index.html`、`css/site.css`、`logo.png`、
   `favicon.ico`、`robots.txt`、`sitemap.xml`）——桶根只 `rclone copy`，
   **不 sync、不 purge**
-- **`download/<tag>/`** 的 10 件安装包与 `manifest.tsv`——轮换只清除
-  `download/` 前缀内 KEEP=3 之外的版本目录（`rclone purge` 一律包在
-  `download/*` 守卫内）
+- **`download/<tag>/`** 的 10 件安装包与 `manifest.tsv`（由
+  `mirror-installers.sh` 上传）——轮换只清除 `download/` 前缀内 KEEP=3
+  之外的版本目录（`rclone purge` 一律包在 `download/*` 守卫内，且本次
+  部署的 tag 绝不清除）
 
 **`releases/` 前缀是桌面更新链路（Keygate）的对象，永不触碰。**
 `.sig`、`.app.tar.gz`、`latest.json` 属更新器专用资产，永不进入

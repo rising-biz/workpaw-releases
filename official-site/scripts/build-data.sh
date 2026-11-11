@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
-# WorkPaw 官网数据管线：拉取本仓库最新正式 release 的元数据，产出
+# WorkPaw 官网数据管线（三脚本分工，各脚本头注释同为权威文档）：
+#   - build-data.sh（本脚本）= 唯一事实源：拉最新正式 release 元数据 → 按 10 个
+#     选择器归类 → 产出 downloads.json（schema 不变）与 manifest.tsv（存
+#     CACHE_ROOT，供 mirror-installers.sh 取用）。零下载，秒级完成。
+#   - mirror-installers.sh = 字节搬运工（发版仪式在国内机跑）：读 downloads.json
+#     为工单 → 拉 10 件安装包 → 本地 sha256 对账工单 → 直传 COS download/<tag>/。
+#   - deploy.sh = 页面发布器：核验 COS 已就位 → download/ 轮换 → Hugo 构建 →
+#     页面对象上传桶根。零大文件。
+#
+# 产出：
 #   1) official-site/data/downloads.json —— 下载页数据（版本、平台分组、COS 镜像直链）
-#   2) $CACHE_ROOT/installers/            —— 10 件安装包镜像缓存
-#   3) $CACHE_ROOT/manifest.tsv           —— sha256<TAB>size<TAB>name 清单（无表头）
+#   2) $CACHE_ROOT/manifest.tsv           —— sha256<TAB>size<TAB>name 清单（无表头）。
+#      sha256 取自 GitHub API 的 digest 字段（服务端声明的资产摘要），manifest 在此
+#      为元数据派生物，供 mirror-installers.sh 随安装包上传；真正的字节对账在
+#      mirror-installers.sh 做本地 sha256 时闭环。
 # stdout 末行输出 WORKPAW_VERSION=<version>，供发布工作流注入 Hugo 构建参数。
 #
 # 用法：
-#   build-data.sh            全量：元数据 + 下载安装包 + manifest.tsv + downloads.json
-#   build-data.sh --sample   示例：仅拉元数据，sha256 以「(本地示例构建)」占位，不下载任何文件
+#   build-data.sh            完整：元数据 + manifest.tsv + downloads.json（不下载任何字节）
+#   build-data.sh --sample   示例：仅拉元数据，sha256/digest 以「(本地示例构建)」占位，
+#                            不写 manifest（本地预览用）
 #
 # 环境变量：
 #   GITHUB_TOKEN     可选，提升 GitHub API 限额
@@ -42,9 +54,7 @@ SITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_DIR="$SITE_DIR/data"
 RELEASE_JSON="$CACHE_ROOT/release.json"
 ASSETS_TSV="$CACHE_ROOT/assets.tsv"
-DOWNLOADS_LIST="$CACHE_ROOT/downloads.list"
 MANIFEST_TSV="$CACHE_ROOT/manifest.tsv"
-INSTALLERS_DIR="$CACHE_ROOT/installers"
 OUT_JSON="$DATA_DIR/downloads.json"
 
 # ---------------------------------------------------------------- 元数据 --
@@ -64,10 +74,10 @@ fi
 # 不匹配任何选择器且命中 .sig/.app.tar.gz/latest.json 的资产跳过（更新器专用，不入镜像）；
 # 其余任何未预期资产名一律报错退出——新平台出现时应人工审核并扩展此表。
 echo "==> 按 10 个选择器归类资产…" >&2
-META="$(python3 - "$RELEASE_JSON" "$ASSETS_TSV" "$DOWNLOADS_LIST" <<'PY'
+META="$(python3 - "$RELEASE_JSON" "$ASSETS_TSV" "$SAMPLE" <<'PY'
 import fnmatch, json, re, sys
 
-release_path, assets_tsv_path, downloads_list_path = sys.argv[1:4]
+release_path, assets_tsv_path, sample = sys.argv[1:4]
 release = json.load(open(release_path, encoding="utf-8"))
 tag = release.get("tag_name") or ""
 published_at = release.get("published_at") or ""
@@ -90,6 +100,8 @@ SELECTORS = [
 ]
 SKIP_SUFFIXES = (".sig", ".app.tar.gz")
 SKIP_EXACT = ("latest.json",)
+# 示例模式与 sha256 同理：digest 只做占位（不写 manifest，占位值不进 downloads.json）
+SAMPLE_DIGEST = "(本地示例构建)"
 
 matched = {}
 skipped = 0
@@ -102,7 +114,8 @@ for asset in release.get("assets", []):
         pattern = hits[0][0]
         if pattern in matched:
             sys.exit(f"错误：选择器 {pattern} 命中多件资产（{matched[pattern][0]}、{name}）。")
-        matched[pattern] = (name, asset.get("size"), asset.get("browser_download_url"))
+        digest = SAMPLE_DIGEST if sample == "1" else (asset.get("digest") or "")
+        matched[pattern] = (name, asset.get("size"), asset.get("browser_download_url"), digest)
     elif name in SKIP_EXACT or any(name.endswith(s) for s in SKIP_SUFFIXES):
         skipped += 1
     else:
@@ -114,17 +127,14 @@ if missing:
 
 rows = []
 for pattern, pid, label, arch, kind in SELECTORS:
-    name, size, url = matched[pattern]
+    name, size, url, digest = matched[pattern]
     if not isinstance(size, int) or size <= 0 or not url:
         sys.exit(f"错误：资产 {name} 的 size/browser_download_url 元数据不完整。")
-    rows.append((pid, label, arch, kind, name, size, url))
+    rows.append((pid, label, arch, kind, name, size, url, digest))
 
 with open(assets_tsv_path, "w", encoding="utf-8") as f:
     for row in rows:
         f.write("\t".join(str(col) for col in row) + "\n")
-with open(downloads_list_path, "w", encoding="utf-8") as f:
-    for _, _, _, _, name, _, url in rows:
-        f.write(f"{name} {url}\n")
 
 print(f"{tag}\t{tag[1:] if tag.startswith('v') else tag}\t{published_at[:10]}", end="")
 print(
@@ -136,51 +146,29 @@ PY
 read -r TAG VERSION PUBLISHED_DATE <<< "$META"
 echo "    最新正式 release：$TAG（发布于 $PUBLISHED_DATE）" >&2
 
-# ------------------------------------------------------------ 生成 JSON --
+# ------------------------------------ manifest.tsv（digest 元数据派生物） --
 mkdir -p "$DATA_DIR"
 if [[ "$SAMPLE" -eq 1 ]]; then
-  echo "==> 示例模式：生成 downloads.json（sha256 占位，不下载文件）…" >&2
+  echo "==> 示例模式：生成 downloads.json（sha256 占位，不写 manifest）…" >&2
   MANIFEST_ARG="-"
 else
-  # ---------------------------------------------------------- 下载安装包 --
-  # downloads.list 每行「安装包名 下载地址」，并发 10 路拉取；
-  # -C - 使已存在的完整文件成为空操作、被中断的文件可断点续传（重跑即续传）。
-  EXPECTED="$(wc -l < "$DOWNLOADS_LIST")"
-  mkdir -p "$INSTALLERS_DIR"
-  echo "==> 下载 $EXPECTED 件安装包到 $INSTALLERS_DIR …" >&2
-  if ! xargs -P 10 -I{} bash -c \
-      'name=${1%% *}; url=${1#* }; curl -fL --retry 3 -C - -o "$0/installers/$name" "$url"' \
-      "$CACHE_ROOT" {} < "$DOWNLOADS_LIST"; then
-    echo "错误：安装包下载失败（直接重跑本脚本即可断点续传）。" >&2
-    exit 1
-  fi
-
-  # ------------------------------------------- 校验并生成 manifest.tsv --
+  # sha256 不再本地算：GitHub API 对每件资产给出服务端 digest（sha256:<64hex>），
+  # 缺失或格式异常说明元数据不可信，直接失败——元数据模式无法自行补出 sha256。
   : > "$MANIFEST_TSV"
-  while IFS=$'\t' read -r _pid _label _arch _kind name size _url; do
-    file="$INSTALLERS_DIR/$name"
-    if [[ ! -f "$file" ]]; then
-      echo "错误：缺少安装包：$name" >&2
+  while IFS=$'\t' read -r _pid _label _arch _kind name size _url digest; do
+    if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      echo "错误：$name 的 GitHub digest 元数据缺失或格式异常（$digest），元数据模式无法确定 sha256。" >&2
       exit 1
     fi
-    sha="$(sha256sum "$file" | awk '{print $1}')"
-    if [[ ! "$sha" =~ ^[0-9a-f]{64}$ ]]; then
-      echo "错误：$name 的 sha256 校验值不是 64 位十六进制。" >&2
-      exit 1
-    fi
-    actual_size="$(stat -c %s "$file")"
-    if [[ "$actual_size" != "$size" ]]; then
-      echo "错误：$name 大小与 release 元数据不一致（元数据 $size 字节，实际 $actual_size 字节）。" >&2
-      exit 1
-    fi
-    printf '%s\t%s\t%s\n' "$sha" "$actual_size" "$name" >> "$MANIFEST_TSV"
+    printf '%s\t%s\t%s\n' "${digest#sha256:}" "$size" "$name" >> "$MANIFEST_TSV"
   done < "$ASSETS_TSV"
   GOT="$(wc -l < "$MANIFEST_TSV")"
+  EXPECTED="$(wc -l < "$ASSETS_TSV")"
   if [[ "$GOT" -ne "$EXPECTED" ]]; then
-    echo "错误：manifest 行数 $GOT != 预期 $EXPECTED，安装包不齐。" >&2
+    echo "错误：manifest 行数 $GOT != 预期 $EXPECTED，元数据归类不齐。" >&2
     exit 1
   fi
-  echo "==> 安装包齐备（$GOT/$EXPECTED），manifest.tsv 已生成。" >&2
+  echo "==> manifest.tsv 已生成（$GOT 件，sha256 取自 GitHub digest 元数据）。" >&2
   MANIFEST_ARG="$MANIFEST_TSV"
 fi
 
@@ -203,7 +191,7 @@ SAMPLE_SHA256 = "(本地示例构建)"
 groups = {}
 with open(assets_tsv_path, encoding="utf-8") as f:
     for line in f:
-        pid, label, arch, kind, name, size, _url = line.rstrip("\n").split("\t")
+        pid, label, arch, kind, name, size, _url, _digest = line.rstrip("\n").split("\t")
         if manifest_arg == "-":
             sha = SAMPLE_SHA256
         elif name in sha_by_name:

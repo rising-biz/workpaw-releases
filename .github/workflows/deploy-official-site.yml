@@ -1,5 +1,6 @@
-# WorkPaw 官网发布：取最新正式 release → 安装包镜像 COS download/<tag>/（KEEP
-# 轮换）→ Hugo 构建静态页 → 页面对象 copy 上传桶根。桶根只 copy 不 sync，
+# WorkPaw 官网发布：取最新正式 release 元数据 → 核验安装包已由仪式脚本
+# （mirror-installers.sh，国内机）就位 COS download/<tag>/（KEEP 轮换）→ Hugo
+# 构建静态页 → 页面对象 copy 上传桶根。桶根只 copy 不 sync，
 # 绝不触碰 Keygate 更新链路对象（releases/ 前缀）。
 # 边界（与仓库 CLAUDE.md 一致）：仅手动从 main 运行；COS 凭据在
 # desktop-releases Environment；hugo 版本固定并用官方 checksums 校验。
@@ -22,7 +23,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: desktop-releases
-    timeout-minutes: 90
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
