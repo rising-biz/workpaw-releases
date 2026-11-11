@@ -1,0 +1,8 @@
+baseURL = "https://workpaw-1253566621.cos.ap-guangzhou.myqcloud.com/"
+title = "WorkPaw — 企业级私有化 AI 智能体平台"
+disableKinds = ["taxonomy", "term", "RSS"]
+enableRobotsTXT = true
+
+# 模板经 getenv 读取构建期注入的版本号（WORKPAW_VERSION），需在此列入白名单
+[security.funcs]
+getenv = ['^HUGO_', '^CI$', '^WORKPAW_VERSION$']

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ .Title }}</title>
+  <meta name="description" content="WorkPaw — 企业级私有化 AI 智能体平台">
+  <link rel="icon" href="favicon.ico?v={{ getenv "WORKPAW_VERSION" | default "dev" }}">
+  <link rel="stylesheet" href="css/site.css?v={{ getenv "WORKPAW_VERSION" | default "dev" }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <a class="brand" href="index.html">
+        <img src="logo.png?v={{ getenv "WORKPAW_VERSION" | default "dev" }}" alt="WorkPaw 标志" width="36" height="36">
+        <span>WorkPaw</span>
+      </a>
+      <nav aria-label="页面导航">
+        <a href="#features">产品特性</a>
+        <a href="#download">下载</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- 以下三个区块为骨架占位，后续任务填实 -->
+    <section id="product">
+      <div class="container">
+        <h2>产品</h2>
+      </div>
+    </section>
+
+    <section id="features">
+      <div class="container">
+        <h2>产品特性</h2>
+      </div>
+    </section>
+
+    <section id="download">
+      <div class="container">
+        <h2>下载</h2>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      © 2026 WorkPaw
+    </div>
+  </footer>
+</body>
+</html>
