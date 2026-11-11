@@ -22,7 +22,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: desktop-releases
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
