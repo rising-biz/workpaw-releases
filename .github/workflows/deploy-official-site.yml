@@ -1,0 +1,51 @@
+# WorkPaw 官网发布：取最新正式 release → 安装包镜像 COS download/<tag>/（KEEP
+# 轮换）→ Hugo 构建静态页 → 页面对象 copy 上传桶根。桶根只 copy 不 sync，
+# 绝不触碰 Keygate 更新链路对象（releases/ 前缀）。
+# 边界（与仓库 CLAUDE.md 一致）：仅手动从 main 运行；COS 凭据在
+# desktop-releases Environment；hugo 版本固定并用官方 checksums 校验。
+name: deploy-official-site
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-official-site
+  cancel-in-progress: false
+
+env:
+  HUGO_VERSION: "0.169.0"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: desktop-releases
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install hugo (pinned) and rclone
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/hugo.tar.gz "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_${HUGO_VERSION}_linux-amd64.tar.gz"
+          curl -fsSL -o /tmp/checksums.txt "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_${HUGO_VERSION}_checksums.txt"
+          grep "hugo_${HUGO_VERSION}_linux-amd64.tar.gz" /tmp/checksums.txt | (cd /tmp && sha256sum -c -)
+          mkdir -p /usr/local/bin && tar -xzf /tmp/hugo.tar.gz -C /usr/local/bin hugo
+          sudo apt-get update && sudo apt-get install -y rclone
+
+      - name: Deploy official site to COS
+        env:
+          RCLONE_CONFIG_COS_TYPE: s3
+          RCLONE_CONFIG_COS_PROVIDER: TencentCOS
+          RCLONE_CONFIG_COS_ACCESS_KEY_ID: ${{ secrets.COS_ACCESS_KEY || secrets.COS_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_COS_SECRET_ACCESS_KEY: ${{ secrets.COS_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_COS_ENDPOINT: https://cos.ap-guangzhou.myqcloud.com
+          COS_REMOTE: cos:workpaw-1253566621
+          COS_PUBLIC_BASE: https://workpaw-1253566621.cos.ap-guangzhou.myqcloud.com
+          CACHE_ROOT: ${{ runner.temp }}/cache
+          KEEP: "3"
+          GITHUB_TOKEN: ${{ github.token }}
+          APPLE_SIGNED: "false"
+        run: bash official-site/scripts/deploy.sh
