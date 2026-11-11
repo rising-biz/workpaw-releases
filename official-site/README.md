@@ -17,14 +17,15 @@ COS 默认域名无目录索引，站内链接全部相对且带 `.html`。
 依赖：hugo **v0.169.0**（与工作流钉死同一版本）、bash、curl、python3。
 
 ```bash
-# 1. 安装钉死版本的 hugo（官方 checksums 校验，与工作流同法）
+# 1. 安装钉死版本的 hugo（官方 checksums 校验，与工作流同法；必须存成
+#    checksums.txt 里的原始文件名，sha256sum -c 才能对上）
 HUGO_VERSION=0.169.0
-curl -fsSL -o /tmp/hugo.tar.gz \
+curl -fsSL -o "/tmp/hugo_${HUGO_VERSION}_linux-amd64.tar.gz" \
   "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_${HUGO_VERSION}_linux-amd64.tar.gz"
-curl -fsSL -o /tmp/checksums.txt \
+curl -fsSL -o /tmp/hugo-checksums.txt \
   "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_${HUGO_VERSION}_checksums.txt"
-grep "hugo_${HUGO_VERSION}_linux-amd64.tar.gz" /tmp/checksums.txt | (cd /tmp && sha256sum -c -)
-tar -xzf /tmp/hugo.tar.gz hugo && export PATH="$PWD:$PATH"   # macOS 换 linux-amd64 为 macos-*
+grep "hugo_${HUGO_VERSION}_linux-amd64.tar.gz" /tmp/hugo-checksums.txt | (cd /tmp && sha256sum -c -)
+tar -xzf "/tmp/hugo_${HUGO_VERSION}_linux-amd64.tar.gz" hugo -C /tmp && export PATH="/tmp:$PATH"   # macOS 换 linux-amd64 为 macos-*
 
 # 2. 生成示例数据：只拉 release 元数据，sha256 以占位符呈现，不下载安装包
 official-site/scripts/build-data.sh --sample
