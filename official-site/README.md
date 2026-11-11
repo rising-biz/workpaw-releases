@@ -30,8 +30,9 @@ tar -xzf "/tmp/hugo_${HUGO_VERSION}_linux-amd64.tar.gz" -C /tmp hugo && export P
 # 2. 生成示例数据：只拉 release 元数据，sha256 以占位符呈现，不下载安装包
 official-site/scripts/build-data.sh --sample
 
-# 3. 本地预览（http://localhost:1313/，示例数据下版本号显示为 dev）
-hugo -s official-site --serve
+# 3. 本地预览（http://localhost:1313/，示例数据下版本号显示为 dev；
+#    serve 是子命令——hugo 0.169 已移除旧的 --serve 旗标）
+hugo server -s official-site
 ```
 
 三个脚本的头注释是权威文档：
