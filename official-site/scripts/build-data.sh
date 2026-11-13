@@ -71,6 +71,11 @@ fi
 
 # ------------------------------------------------- 资产归类（选择器表钉死） --
 # 每行：安装包名模式 | 平台 id | 平台 label | arch | kind
+# 资产名大小写与 src-tauri/tauri.conf.json 的 productName（WorkPaw）逐字一致：
+# v0.0.25 实发资产的 10 个文件名全部保留 productName 原样大小写（dmg/exe/msi/
+# AppImage/deb 用下划线分隔，rpm 用连字符并带 -1 release 段）；改名后新版本
+# 产物相应变为 WorkPaw_* / WorkPaw-*。不再匹配旧 Workpaw_* 资产属预期——
+# 本脚本只归类最新一次 release。
 # 不匹配任何选择器且命中 .sig/.app.tar.gz/latest.json 的资产跳过（更新器专用，不入镜像）；
 # 其余任何未预期资产名一律报错退出——新平台出现时应人工审核并扩展此表。
 echo "==> 按 10 个选择器归类资产…" >&2
@@ -87,16 +92,16 @@ if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", published_at[:10]):
     sys.exit(f"错误：published_at 格式异常：{published_at!r}")
 
 SELECTORS = [
-    ("Workpaw_*_aarch64.dmg",     "macos",      "macOS",         "Apple Silicon", "dmg"),
-    ("Workpaw_*_x64.dmg",         "macos",      "macOS",         "Intel",         "dmg"),
-    ("Workpaw_*_x64-setup.exe",   "windows",    "Windows",       "x64",           "exe"),
-    ("Workpaw_*_x64_en-US.msi",   "windows",    "Windows",       "x64",           "msi"),
-    ("Workpaw_*_amd64.AppImage",  "linux-x64",  "Linux（x64）",  "x64",           "AppImage"),
-    ("Workpaw_*_amd64.deb",       "linux-x64",  "Linux（x64）",  "x64",           "deb"),
-    ("Workpaw-*.x86_64.rpm",      "linux-x64",  "Linux（x64）",  "x64",           "rpm"),
-    ("Workpaw_*_aarch64.AppImage","linux-arm64","Linux（ARM64）","ARM64",         "AppImage"),
-    ("Workpaw_*_arm64.deb",       "linux-arm64","Linux（ARM64）","ARM64",         "deb"),
-    ("Workpaw-*.aarch64.rpm",     "linux-arm64","Linux（ARM64）","ARM64",         "rpm"),
+    ("WorkPaw_*_aarch64.dmg",     "macos",      "macOS",         "Apple Silicon", "dmg"),
+    ("WorkPaw_*_x64.dmg",         "macos",      "macOS",         "Intel",         "dmg"),
+    ("WorkPaw_*_x64-setup.exe",   "windows",    "Windows",       "x64",           "exe"),
+    ("WorkPaw_*_x64_en-US.msi",   "windows",    "Windows",       "x64",           "msi"),
+    ("WorkPaw_*_amd64.AppImage",  "linux-x64",  "Linux（x64）",  "x64",           "AppImage"),
+    ("WorkPaw_*_amd64.deb",       "linux-x64",  "Linux（x64）",  "x64",           "deb"),
+    ("WorkPaw-*.x86_64.rpm",      "linux-x64",  "Linux（x64）",  "x64",           "rpm"),
+    ("WorkPaw_*_aarch64.AppImage","linux-arm64","Linux（ARM64）","ARM64",         "AppImage"),
+    ("WorkPaw_*_arm64.deb",       "linux-arm64","Linux（ARM64）","ARM64",         "deb"),
+    ("WorkPaw-*.aarch64.rpm",     "linux-arm64","Linux（ARM64）","ARM64",         "rpm"),
 ]
 SKIP_SUFFIXES = (".sig", ".app.tar.gz")
 SKIP_EXACT = ("latest.json",)

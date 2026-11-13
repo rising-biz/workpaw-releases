@@ -1,5 +1,18 @@
 name: Build WorkPaw Desktop Release
 
+# 频道模型（P1-5）：tag 含 prerelease 段（vX.Y.Z-beta.1 等）→ prerelease 分支，
+# 在 latest.json 之外额外产出 beta.json（同结构、同 updater 签名旁车，指向
+# 本 release 自身的公开静态下载 URL）；stable 版本继续只产出 latest.json。
+# GitHub 的 releases/latest 恒指向最新正式版，beta.json 不会污染 stable 频道。
+#
+# 代码签名/公证闸门（P0-4 工程闭环，证书采购本身是外部事项）：凭据全部可选
+# ——desktop-releases Environment 配了 Apple 证书即走 Apple 签名（MAC_NOTARIZE=1
+# 时升格为硬性要求并构建后复核公证 staple）、配了 WINDOWS_CERT_THUMBPRINT 即走
+# tauri 原生 Authenticode 签名 + 构建后 signtool 复核（fail-closed）；无凭据时
+# 保持现状并在 job summary 打印「未签名产物」横幅。Environment 变量
+# REQUIRE_CODE_SIGNING=true 时，verify-release 要求签名证据齐备，缺失即 fail
+# （未配置则降级为 summary 提示），并产出机器可读的 signing.json 旁车。
+
 on:
   workflow_dispatch:
     inputs:
@@ -22,7 +35,7 @@ env:
   RELEASE_REPOSITORY: rising-biz/workpaw-releases
   SOURCE_REPOSITORY: rising-biz/workpaw-desktop
   WORKPAW_UI_REPOSITORY: https://github.com/rising-biz/workpaw-ui.git
-  WORKPAW_UI_REF: 2c3bf4beee8d2ee4954ff8f958df88dfaa7d1ed0 # reviewed workpaw-ui commit
+  WORKPAW_UI_REF: e9dbc17e678200da6b19b8002dedd5d5887a2709 # reviewed workpaw-ui commit
 
 jobs:
   preflight:
@@ -107,6 +120,25 @@ jobs:
           node scripts/check-release-version.mjs "$RELEASE_TAG"
           node scripts/check-production-environment.mjs
           node scripts/check-release-distribution.mjs
+
+      # 桌面私有仓不跑仓库内 Actions（分钟计费不可用），其源码秘密扫描由
+      # 发布流水线在此兜底：对检出的发布 tag 做 HEAD（--no-git）扫描，与
+      # 各源码仓的 secret-scan.yml 同一 gitleaks 版本与 checksum 钉法。
+      # 发布产物（tag）即产品出口，扫描它的意义不低于扫描 main 分支。
+      - name: Scan Desktop source for leaked secrets (gitleaks, HEAD)
+        working-directory: source
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gitleaks_8.24.3_linux_x64.tar.gz"
+          curl -sSfL -o "${archive}" "https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz"
+          echo "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}" gitleaks
+          config="$(ls .gitleaks.toml 2>/dev/null || true)"
+          if [[ -z "$config" ]]; then
+            config="${RUNNER_TEMP}/gitleaks.toml"
+            printf '[extend]\nuseDefault = true\n' > "$config"
+          fi
+          "${RUNNER_TEMP}/gitleaks" detect --redact --no-git --source . --config "$config" --verbose
 
   prepare-release:
     name: Prepare public draft release
@@ -206,6 +238,19 @@ jobs:
       APPLE_API_KEY: ${{ matrix.apple_signing && secrets.APPLE_API_KEY || '' }}
       APPLE_API_KEY_CONTENT: ${{ matrix.apple_signing && secrets.APPLE_API_KEY_CONTENT || '' }}
       APPLE_API_KEY_PATH: ${{ github.workspace }}/source/AuthKey.p8
+      # 签名/公证闸门（P0-4）：凭据可选。MAC_NOTARIZE 是 desktop-releases
+      # Environment 的变量（vars），=1 时 Apple 签名/公证从「可选」升格为
+      # 「缺失即硬失败」；Windows Authenticode 由 WINDOWS_CERT_THUMBPRINT
+      # 触发（+可选 WINDOWS_CERT_PFX/WINDOWS_CERT_PFX_PASSWORD 导入、
+      # WINDOWS_TIMESTAMP_URL 覆盖默认时间戳服务），经 tauri 原生签名配置注入。
+      MAC_NOTARIZE: ${{ matrix.apple_signing && vars.MAC_NOTARIZE || '' }}
+      WINDOWS_CERT_THUMBPRINT: ${{ matrix.target == 'x86_64-pc-windows-msvc' && secrets.WINDOWS_CERT_THUMBPRINT || '' }}
+      WINDOWS_CERT_PFX: ${{ matrix.target == 'x86_64-pc-windows-msvc' && secrets.WINDOWS_CERT_PFX || '' }}
+      WINDOWS_CERT_PFX_PASSWORD: ${{ matrix.target == 'x86_64-pc-windows-msvc' && secrets.WINDOWS_CERT_PFX_PASSWORD || '' }}
+      WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+      # tauri build 附加参数：Windows 签名配置启用时由准备步骤追加
+      # `--config <file>`；其余平台恒为空（string-argv 解析容忍尾随空白）
+      TAURI_SIGNING_CONFIG_ARGS: ''
     steps:
       - name: Check out verified private Desktop source revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -224,9 +269,12 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
 
-      - name: Validate optional Apple signing credentials
+      - name: Validate Apple signing/notarization mode
+        id: apple-signing
         if: matrix.apple_signing
         shell: bash
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -euo pipefail
           apple_names=(
@@ -242,6 +290,11 @@ jobs:
             fi
           done
           if [[ "$configured" == 0 ]]; then
+            if [[ "${MAC_NOTARIZE:-}" == "1" ]]; then
+              echo "错误：MAC_NOTARIZE=1 要求 Apple 代码签名凭据齐备，desktop-releases Environment 缺失整组配置。" >&2
+              echo "      补救：配置 APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY / KEYCHAIN_PASSWORD，或移除 Environment 变量 MAC_NOTARIZE 降级为可选签名。" >&2
+              exit 1
+            fi
             echo "Apple certificate secrets are not configured; the release will be Tauri-updater-signed only."
             exit 0
           fi
@@ -251,8 +304,94 @@ jobs:
               exit 1
             fi
           done
-        env:
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          # 公证凭据：App Store Connect API 路径或 Apple ID 路径二选一即可
+          api_path=0
+          appleid_path=0
+          [[ -n "${APPLE_API_KEY_CONTENT:-}" && -n "${APPLE_API_ISSUER:-}" ]] && api_path=1
+          [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]] && appleid_path=1
+          if [[ "$api_path" == 0 && "$appleid_path" == 0 ]]; then
+            if [[ "${MAC_NOTARIZE:-}" == "1" ]]; then
+              echo "错误：MAC_NOTARIZE=1 要求公证凭据齐备：App Store Connect API（APPLE_API_KEY_CONTENT + APPLE_API_ISSUER）或 Apple ID（APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID）二选一。" >&2
+              exit 1
+            fi
+            echo "Apple signing configured but no notarization credentials; artifacts will be signed without notarization."
+          fi
+          printf 'signed_%s=true\n' "${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      # Windows Authenticode（P0-4 工程闭环）：凭据可选；配置后走 tauri 原生
+      # 签名（certificateThumbprint/digestAlgorithm/timestampUrl 经 --config
+      # 注入），signtool 由 tauri 在打包时调用——安装包先 Authenticode 签名、
+      # 后算 updater minisign 签名，更新链路保持一致。刻意不做「事后替换安装
+      # 包字节」：那会使 latest.json 的 updater 签名失配、破坏 Windows 自动
+      # 更新；signed 与否由构建后的 signtool 复核步 fail-closed 兜底。
+      - name: Resolve Windows Authenticode signing mode
+        id: windows-signing
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          thumb="${WINDOWS_CERT_THUMBPRINT// /}"
+          if [[ -z "$thumb" ]]; then
+            echo "Windows Authenticode credentials are not configured; the installer stays Tauri-updater-signed only."
+            exit 0
+          fi
+          if [[ ! "$thumb" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "错误：WINDOWS_CERT_THUMBPRINT 须为 40 位十六进制 SHA-1 指纹（去空格后当前：$thumb）。" >&2
+            exit 1
+          fi
+          if [[ -n "${WINDOWS_CERT_PFX:-}" && -z "${WINDOWS_CERT_PFX_PASSWORD:-}" ]]; then
+            echo "错误：配置了 WINDOWS_CERT_PFX 但缺 WINDOWS_CERT_PFX_PASSWORD（PFX 口令不可为空）。" >&2
+            exit 1
+          fi
+          printf 'signed_%s=true\n' "${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Import Windows Authenticode certificate
+        if: matrix.target == 'x86_64-pc-windows-msvc' && steps.windows-signing.outputs.signed_x86_64-pc-windows-msvc == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $thumb = $env:WINDOWS_CERT_THUMBPRINT.Replace(' ', '')
+          if ($env:WINDOWS_CERT_PFX -ne '') {
+            $pfxPath = Join-Path $env:RUNNER_TEMP 'workpaw-codesign.pfx'
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+            $secure = ConvertTo-SecureString -String $env:WINDOWS_CERT_PFX_PASSWORD -AsPlainText -Force
+            Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $secure | Out-Null
+            Remove-Item -Force $pfxPath
+            Write-Host "PFX imported into Cert:\CurrentUser\My"
+          }
+          $found = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Thumbprint -eq $thumb }
+          if (-not $found) {
+            throw "WINDOWS_CERT_THUMBPRINT $thumb not found in Cert:\CurrentUser\My (PFX import failed or token cert not present)"
+          }
+          Write-Host "Windows signing certificate ready: $($found.Subject)"
+
+      - name: Generate native Tauri Windows signing config
+        if: matrix.target == 'x86_64-pc-windows-msvc' && steps.windows-signing.outputs.signed_x86_64-pc-windows-msvc == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_file="$RUNNER_TEMP/tauri.windows.codesign.json"
+          timestamp_url="${WINDOWS_TIMESTAMP_URL:-http://timestamp.digicert.com}"
+          thumb="${WINDOWS_CERT_THUMBPRINT// /}"
+          case "$timestamp_url" in
+            *'"'*|*'\''*)
+              echo "错误：WINDOWS_TIMESTAMP_URL 含引号字符，拒绝写入签名配置。" >&2
+              exit 1
+              ;;
+          esac
+          cat > "$config_file" <<JSON
+          {
+            "bundle": {
+              "windows": {
+                "certificateThumbprint": "$thumb",
+                "digestAlgorithm": "sha256",
+                "timestampUrl": "$timestamp_url"
+              }
+            }
+          }
+          JSON
+          echo "Tauri native Windows signing config: $config_file (timestamp: $timestamp_url)"
+          echo "TAURI_SIGNING_CONFIG_ARGS=--config $config_file" >> "$GITHUB_ENV"
 
       - name: Install pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -356,7 +495,109 @@ jobs:
           retryAttempts: 2
           uploadUpdaterJson: true
           tauriScript: node scripts/ci/tauri-build.cjs
-          args: --target ${{ matrix.target }}
+          # TAURI_SIGNING_CONFIG_ARGS 由 Windows 签名准备步骤注入
+          # （--config <file>）；其余平台为空，等价于原 --target 单参数
+          args: --target ${{ matrix.target }} ${{ env.TAURI_SIGNING_CONFIG_ARGS }}
+
+      # fail-closed 复核：Windows 凭据配了就必须真的签上。若 workpaw-desktop
+      # 的 scripts/ci/tauri-build.cjs 不把 --config 参数转发给 tauri CLI，本步
+      # 会硬失败并给出补救指引（跨仓需求：桌面仓确认转发行为，或直接在
+      # tauri.conf.json 配置 bundle.windows 签名段）。
+      - name: Verify Windows Authenticode signatures (fail-closed)
+        if: matrix.target == 'x86_64-pc-windows-msvc' && steps.windows-signing.outputs.signed_x86_64-pc-windows-msvc == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(
+            source/src-tauri/target/*/release/bundle/nsis/*.exe
+            source/src-tauri/target/*/release/bundle/msi/*.msi
+          )
+          if (( ${#files[@]} == 0 )); then
+            echo "错误：未找到 Windows 安装包产物（bundle/nsis/*.exe、bundle/msi/*.msi）。" >&2
+            exit 1
+          fi
+          signtool="$(ls "/c/Program Files (x86)/Windows Kits/10/bin/"*/x64/signtool.exe 2>/dev/null | sort -V | tail -1 || true)"
+          if [[ -z "$signtool" ]]; then
+            echo "错误：未在 Windows Kits 目录中定位到 signtool.exe。" >&2
+            exit 1
+          fi
+          echo "signtool: $signtool"
+          failed=0
+          for f in "${files[@]}"; do
+            echo "==> signtool verify /pa /all: $f"
+            if ! "$signtool" verify /pa /all "$f" >/dev/null 2>&1; then
+              echo "错误：$f 未通过 Authenticode 校验（tauri 未执行原生签名）。" >&2
+              failed=1
+            fi
+          done
+          if (( failed != 0 )); then
+            echo "补救：确认 workpaw-desktop 的 scripts/ci/tauri-build.cjs 会把 --config 参数转发给 tauri CLI；" >&2
+            echo "      或直接在桌面仓 tauri.conf.json 配置 bundle.windows.certificateThumbprint / digestAlgorithm / timestampUrl。" >&2
+            exit 1
+          fi
+          echo "Windows 安装包 Authenticode 签名复核通过（${#files[@]} 件）。"
+
+      # MAC_NOTARIZE=1 时构建后复核：.app 必须有效 codesign 且带公证 staple。
+      - name: Verify macOS codesign and notarization staple (fail-closed)
+        if: matrix.apple_signing && env.MAC_NOTARIZE == '1'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(source/src-tauri/target/*/release/bundle/dmg/*.dmg)
+          if (( ${#dmgs[@]} == 0 )); then
+            echo "错误：未找到 macOS dmg 产物。" >&2
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            mnt="$RUNNER_TEMP/dmg-verify-$(basename "$dmg" .dmg)"
+            mkdir -p "$mnt"
+            hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+            app="$(find "$mnt" -maxdepth 2 -name '*.app' -print -quit)"
+            if [[ -z "$app" ]]; then
+              echo "错误：$dmg 内未找到 .app。" >&2
+              hdiutil detach "$mnt" || true
+              exit 1
+            fi
+            echo "==> codesign --verify --strict: $app"
+            codesign --verify --strict --verbose=1 "$app"
+            echo "==> stapler validate: $app"
+            xcrun stapler validate "$app"
+            hdiutil detach "$mnt"
+            echo "    $dmg：codesign 与公证 staple 复核通过。"
+          done
+
+      # 未签名产物横幅（P0-4）：无凭据=保持现状（Tauri updater 签名 only），
+      # 但必须在 job summary 明示「企业分发前必须完成签名」。
+      - name: Summarize artifact signing status
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            macOS)
+              if [[ -n "${APPLE_CERTIFICATE:-}" ]]; then
+                echo "macOS：Apple 代码签名已启用（MAC_NOTARIZE=${MAC_NOTARIZE:-0}；=1 时构建后复核公证 staple）。" | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                echo "## ⚠ 未签名产物（企业分发前必须完成签名）" | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "macOS 本 leg 仅含 Tauri updater 签名（未配置 Apple 代码签名凭据）；企业批量分发前必须在 desktop-releases Environment 配置 Apple 证书与公证凭据并重新出包。" | tee -a "$GITHUB_STEP_SUMMARY"
+              fi
+              ;;
+            Windows)
+              if [[ -n "${WINDOWS_CERT_THUMBPRINT// /}" ]]; then
+                echo "Windows：Authenticode 签名已启用（tauri 原生签名 + 构建后 signtool 复核）。" | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                echo "## ⚠ 未签名产物（企业分发前必须完成签名）" | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+                echo "Windows 本 leg 仅含 Tauri updater 签名（未配置 WINDOWS_CERT_THUMBPRINT）；SmartScreen 将拦截未签名安装包，企业批量分发前必须在 desktop-releases Environment 配置 Windows Authenticode 凭据（EV 证书）并重新出包。" | tee -a "$GITHUB_STEP_SUMMARY"
+              fi
+              ;;
+            Linux)
+              echo "Linux：无 OS 级安装包签名（Tauri updater 签名 only）；如企业内网分发需要 apt/yum 仓库 GPG 签名，见交付包外部事项清单。" | tee -a "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
 
       - name: Remove temporary Apple signing material
         if: always() && matrix.apple_signing
@@ -368,11 +609,18 @@ jobs:
 
   verify-release:
     name: Verify public updater manifest
-    needs: build
+    needs: [preflight, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment:
+      name: desktop-releases
     env:
       RELEASE_TAG: ${{ inputs.desktop_tag }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+      IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
+      # Environment 变量（非 secret）：REQUIRE_CODE_SIGNING=true 时签名闸门
+      # 为硬失败（缺签名证据即 fail）；未配置则降级为 summary 提示
+      REQUIRE_CODE_SIGNING: ${{ vars.REQUIRE_CODE_SIGNING }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Download draft updater manifest
@@ -410,47 +658,137 @@ jobs:
           mv "$manifest.normalized" "$manifest"
           gh release upload "$RELEASE_TAG" "$manifest#latest.json" \
             --repo "$RELEASE_REPOSITORY" --clobber
+          # beta 频道（P1-5）：prerelease 分支额外产出 beta.json——与归一化后
+          # 的 latest.json 同一份内容（同结构、同 updater 签名旁车字段，URL
+          # 全部指向本 release 自身的公开静态下载地址），beta 通道客户端钉住
+          # 该 tag 的 beta.json 即可；stable 版本不产出 beta.json，继续只有
+          # latest.json。GitHub releases/latest 恒指向最新正式版，本步骤不会
+          # 影响 stable 频道。
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            cp "$manifest" release-assets/beta.json
+            gh release upload "$RELEASE_TAG" release-assets/beta.json#beta.json \
+              --repo "$RELEASE_REPOSITORY" --clobber
+            echo "Prerelease detected: published beta.json alongside latest.json."
+          fi
 
-      - name: Validate manifest and uploaded public assets
+      - name: Validate manifests and uploaded public assets
         run: |
           set -euo pipefail
-          manifest=release-assets/latest.json
-          jq empty "$manifest"
-          jq -e --arg version "${RELEASE_TAG#v}" \
-            --arg downloadPrefix "https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/" '
-            .version == $version and
-            (.platforms | type == "object") and
-            (.platforms | has("darwin-aarch64")) and
-            (.platforms | has("darwin-x86_64")) and
-            (.platforms | has("windows-x86_64")) and
-            (.platforms | has("linux-x86_64")) and
-            (.platforms | has("linux-aarch64")) and
-            ([.platforms[] | select((.signature // "") == "")] | length == 0) and
-            ([.platforms[] | select(
-              (.url // "") |
-              startswith($downloadPrefix) |
-              not
-            )] | length == 0)
-          ' "$manifest" >/dev/null
+          # 四重校验（jq empty / 结构 / 资产映射 / 公开可达，见本 job 与
+          # verify-public-release）对 beta.json 同样执行（prerelease 时）
+          manifests=(release-assets/latest.json)
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            manifests+=(release-assets/beta.json)
+          fi
           gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets \
             --jq '[.assets[] | {apiUrl, name, url}]' > release-assets/assets.json
-          jq -e --arg downloadPrefix "https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/" \
-            --slurpfile assets release-assets/assets.json '
-            ($assets[0] // []) as $uploaded |
-            [.platforms[].url] as $requiredUrls |
-            ($uploaded | any(.name | endswith(".exe"))) and
-            ($uploaded | any(.name | endswith(".msi"))) and
-            ($uploaded | any(.name | endswith(".deb"))) and
-            ($uploaded | any(.name | endswith(".rpm"))) and
-            ($uploaded | any(.name | endswith(".AppImage"))) and
-            all(
-              $requiredUrls[];
-              . as $requiredUrl |
-              ($uploaded | any(($downloadPrefix + (.name | @uri)) == $requiredUrl))
-            )
-          ' "$manifest" >/dev/null
+          for manifest in "${manifests[@]}"; do
+            echo "==> Validating $manifest"
+            jq empty "$manifest"
+            jq -e --arg version "${RELEASE_TAG#v}" \
+              --arg downloadPrefix "https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/" '
+              .version == $version and
+              (.platforms | type == "object") and
+              (.platforms | has("darwin-aarch64")) and
+              (.platforms | has("darwin-x86_64")) and
+              (.platforms | has("windows-x86_64")) and
+              (.platforms | has("linux-x86_64")) and
+              (.platforms | has("linux-aarch64")) and
+              ([.platforms[] | select((.signature // "") == "")] | length == 0) and
+              ([.platforms[] | select(
+                (.url // "") |
+                startswith($downloadPrefix) |
+                not
+              )] | length == 0)
+            ' "$manifest" >/dev/null
+            jq -e --arg downloadPrefix "https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/" \
+              --slurpfile assets release-assets/assets.json '
+              ($assets[0] // []) as $uploaded |
+              [.platforms[].url] as $requiredUrls |
+              ($uploaded | any(.name | endswith(".exe"))) and
+              ($uploaded | any(.name | endswith(".msi"))) and
+              ($uploaded | any(.name | endswith(".deb"))) and
+              ($uploaded | any(.name | endswith(".rpm"))) and
+              ($uploaded | any(.name | endswith(".AppImage"))) and
+              all(
+                $requiredUrls[];
+                . as $requiredUrl |
+                ($uploaded | any(($downloadPrefix + (.name | @uri)) == $requiredUrl))
+              )
+            ' "$manifest" >/dev/null
+          done
           echo "Public updater manifest is valid:"
-          jq '{version, platforms: (.platforms | keys)}' "$manifest"
+          jq '{version, platforms: (.platforms | keys)}' release-assets/latest.json
+
+      # 更新器签名旁车（.sig）：五平台 updater 工件的 minisign 旁车必须在
+      # draft 资产中成对存在（macOS 走 .app.tar.gz.sig，Windows 走 .exe.sig
+      # 与 .msi.sig，Linux 走 .deb.sig/.rpm.sig/.AppImage.sig；dmg 本体不是
+      # updater 工件，无旁车属预期）。
+      - name: Verify updater signature sidecars (.sig)
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --json assets \
+            --jq '[.assets[].name]' > release-assets/asset-names.json
+          missing=0
+          for suffix in .app.tar.gz.sig .exe.sig .msi.sig .deb.sig .rpm.sig .AppImage.sig; do
+            if ! jq -e --arg suffix "$suffix" 'any(.[]; endswith($suffix))' \
+                 release-assets/asset-names.json >/dev/null; then
+              echo "错误：release 资产缺少 updater 签名旁车（*$suffix）。" >&2
+              missing=1
+            fi
+          done
+          if (( missing != 0 )); then
+            echo "补救：检查构建产物上传完整性；.sig 旁车由 tauri-action 随工件一并上传，缺失即属异常。" >&2
+            exit 1
+          fi
+          echo "五平台 updater 签名旁车（.sig）齐备。"
+
+      # 签名闸门（P0-4 工程闭环）：把本次构建的真实签名状态写成机器可读的
+      # signing.json 旁车并上传 release；Environment 配置
+      # REQUIRE_CODE_SIGNING=true 时，OS 级签名证据缺失即 fail（硬门禁），
+      # 未配置则降级为 summary 提示（未签名产物横幅）。
+      - name: Write signing manifest and enforce code-signing gate
+        env:
+          APPLE_AARCH64_SIGNED: ${{ needs.build.outputs.signed_aarch64-apple-darwin }}
+          APPLE_X86_64_SIGNED: ${{ needs.build.outputs.signed_x86_64-apple-darwin }}
+          WINDOWS_SIGNED: ${{ needs.build.outputs.signed_x86_64-pc-windows-msvc }}
+        run: |
+          set -euo pipefail
+          apple_signed=false
+          [[ "$APPLE_AARCH64_SIGNED" == "true" && "$APPLE_X86_64_SIGNED" == "true" ]] && apple_signed=true
+          windows_signed=false
+          [[ "$WINDOWS_SIGNED" == "true" ]] && windows_signed=true
+          cat > release-assets/signing.json <<JSON
+          {
+            "tag": "$RELEASE_TAG",
+            "source_sha": "$SOURCE_SHA",
+            "prerelease": $IS_PRERELEASE,
+            "updater_signature_sidecars": true,
+            "apple_codesign": $apple_signed,
+            "windows_authenticode": $windows_signed,
+            "linux_native_signing": "not-applicable",
+            "require_code_signing_env": "${REQUIRE_CODE_SIGNING:-unset}"
+          }
+          JSON
+          jq empty release-assets/signing.json
+          gh release upload "$RELEASE_TAG" release-assets/signing.json#signing.json \
+            --repo "$RELEASE_REPOSITORY" --clobber
+          echo "signing.json 已上传：apple_codesign=$apple_signed windows_authenticode=$windows_signed"
+          if [[ "${REQUIRE_CODE_SIGNING:-}" == "true" ]]; then
+            if [[ "$apple_signed" != "true" || "$windows_signed" != "true" ]]; then
+              echo "错误：Environment 配置了 REQUIRE_CODE_SIGNING=true，但本次构建未完成 OS 级签名（apple_codesign=$apple_signed，windows_authenticode=$windows_signed）。" >&2
+              echo "      补救：在 desktop-releases Environment 配置 Apple 证书/公证凭据与 WINDOWS_CERT_THUMBPRINT（+可选 PFX）后重新出包；或调整 REQUIRE_CODE_SIGNING。" >&2
+              exit 1
+            fi
+            echo "签名闸门通过：REQUIRE_CODE_SIGNING=true 且 OS 级签名证据齐备。"
+          elif [[ "$apple_signed" != "true" || "$windows_signed" != "true" ]]; then
+            {
+              echo "## ⚠ 未签名产物（企业分发前必须完成签名）"
+              echo
+              echo "- apple_codesign：\`$apple_signed\` · windows_authenticode：\`$windows_signed\` · REQUIRE_CODE_SIGNING：\`${REQUIRE_CODE_SIGNING:-未配置}\`"
+              echo "- 本 Release 仅含 Tauri updater 签名；企业批量分发（SmartScreen/Gatekeeper）前必须在 desktop-releases Environment 配置 OS 级签名凭据并重新出包。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   publish:
     name: Publish verified public release
@@ -474,11 +812,12 @@ jobs:
 
   verify-public-release:
     name: Confirm public updater downloads
-    needs: publish
+    needs: [preflight, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
       RELEASE_TAG: ${{ inputs.desktop_tag }}
+      IS_PRERELEASE: ${{ needs.preflight.outputs.is_prerelease }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Confirm manifest URLs resolve without GitHub API credentials
@@ -489,19 +828,33 @@ jobs:
             --repo "$RELEASE_REPOSITORY" \
             --pattern latest.json \
             --dir release-assets
-          manifest=release-assets/latest.json
-          public_prefix="https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/"
-          jq -e --arg version "${RELEASE_TAG#v}" --arg prefix "$public_prefix" '
-            .version == $version and
-            (.platforms | has("darwin-aarch64")) and
-            (.platforms | has("darwin-x86_64")) and
-            (.platforms | has("windows-x86_64")) and
-            (.platforms | has("linux-x86_64")) and
-            (.platforms | has("linux-aarch64")) and
-            ([.platforms[] | select((.signature // "") == "")] | length == 0) and
-            ([.platforms[].url | startswith($prefix)] | all)
-          ' "$manifest" >/dev/null
-          jq -r '.platforms[].url' "$manifest" | sort -u | while IFS= read -r url; do
-            curl --fail --location --silent --show-error --head --retry 3 "$url" >/dev/null
+          manifests=(release-assets/latest.json)
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            # beta 频道：prerelease 发布后 beta.json 也必须匿名可达
+            gh release download "$RELEASE_TAG" \
+              --repo "$RELEASE_REPOSITORY" \
+              --pattern beta.json \
+              --dir release-assets
+            manifests+=(release-assets/beta.json)
+          fi
+          for manifest in "${manifests[@]}"; do
+            echo "==> Confirming anonymous downloads: $manifest"
+            public_prefix="https://github.com/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/"
+            jq -e --arg version "${RELEASE_TAG#v}" --arg prefix "$public_prefix" '
+              .version == $version and
+              (.platforms | has("darwin-aarch64")) and
+              (.platforms | has("darwin-x86_64")) and
+              (.platforms | has("windows-x86_64")) and
+              (.platforms | has("linux-x86_64")) and
+              (.platforms | has("linux-aarch64")) and
+              ([.platforms[] | select((.signature // "") == "")] | length == 0) and
+              ([.platforms[].url | startswith($prefix)] | all)
+            ' "$manifest" >/dev/null
+            jq -r '.platforms[].url' "$manifest" | sort -u | while IFS= read -r url; do
+              curl --fail --location --silent --show-error --head --retry 3 "$url" >/dev/null
+            done
           done
-          echo "Confirmed anonymous public updater downloads for $RELEASE_TAG."
+          echo "Confirmed anonymous public updater downloads for $RELEASE_TAG (${#manifests[@]} manifest)."
+          if [[ "$IS_PRERELEASE" != "true" ]]; then
+            echo "Stable channel: latest.json only (beta.json is not produced for stable releases)."
+          fi

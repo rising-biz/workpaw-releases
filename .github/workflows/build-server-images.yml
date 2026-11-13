@@ -54,10 +54,18 @@ permissions:
 
 env:
   REGISTRY: docker.io
+  # 镜像命名空间（P1-5 文档与参数层，保持可配置）：当前为个人命名空间
+  # 364950776（历史部署契约：客户 deploy.env 的 REGISTRY 与 chart 默认值均
+  # 指向 docker.io/364950776）。组织化迁移目标为 Docker Hub org「workpaw」
+  #（占位规划值）：建立 org、在 desktop-releases Environment 配置其推送
+  # 凭据后，把本值改为 workpaw 即完成切换（其余步骤零改动；本工作流不主动
+  # 改镜像推送目标）。迁移后在交付包 §2.2 与 release-notes 同步更新引用，
+  # 并按 README「镜像仓库迁移与 cosign/SBOM 接线清单」补 provenance/SBOM
+  # 参数与 cosign 签名步骤。
   IMAGE_NAMESPACE: 364950776
   # reviewed workpaw-ui commit（与 build-desktop-release.yml 同一钉版；
   # 源码仓库各自 CI 的 UI 钉版更新时一并评估）
-  WORKPAW_UI_REF: 2c3bf4beee8d2ee4954ff8f958df88dfaa7d1ed0
+  WORKPAW_UI_REF: e9dbc17e678200da6b19b8002dedd5d5887a2709
 
 jobs:
   preflight:

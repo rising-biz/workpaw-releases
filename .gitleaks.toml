@@ -1,0 +1,6 @@
+# gitleaks configuration — extends the built-in rules.
+# CI runs a HEAD (--no-git) scan: new leaks block merges; historical leaks are
+# remediated by credential rotation (docs/runbooks/credential-rotation.md),
+# not by scan suppression.
+[extend]
+useDefault = true

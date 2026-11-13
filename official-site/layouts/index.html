@@ -6,6 +6,14 @@
   <meta name="theme-color" content="#0B1F14">
   <title>{{ .Title }}</title>
   <meta name="description" content="WorkPaw 是企业级私有化、多用户的 AI 智能体平台：部署在您自己的 Kubernetes 集群，员工独立实例、数据隔离、全程可审计。提供 macOS / Windows / Linux 桌面客户端下载。">
+  <!-- P2-1 SEO 基础：canonical / OpenGraph。
+       TODO(DOMAIN): 下方 canonical 的域名是占位示例，上线前替换为正式站点域名；
+       若继续使用 COS 默认域名，可改为引用 hugo.toml 的 baseURL（即站点模板里的 Site.BaseURL），随配置派生。
+       在替换前，canonical 指向的是不可解析的示例域名，属预期内的占位状态。 -->
+  <link rel="canonical" href="https://workpaw.example.com/">
+  <meta property="og:title" content="{{ .Title }}">
+  <meta property="og:description" content="WorkPaw 是企业级私有化、多用户的 AI 智能体平台：部署在您自己的 Kubernetes 集群，员工独立实例、数据隔离、全程可审计。">
+  <meta property="og:type" content="website">
   <link rel="icon" href="favicon.ico?v={{ getenv "WORKPAW_VERSION" | default "dev" }}">
   <link rel="stylesheet" href="css/site.css?v={{ getenv "WORKPAW_VERSION" | default "dev" }}">
 </head>
@@ -19,6 +27,10 @@
       <nav aria-label="页面导航">
         <a href="#product">产品</a>
         <a href="#features">特性</a>
+        <a href="#security">安全合规</a>
+        <a href="#docs">文档</a>
+        <a href="#cases">案例</a>
+        <a href="#contact">联系</a>
         <a href="#download">下载</a>
       </nav>
       <a class="btn btn-primary btn-small" href="#download">下载</a>
@@ -117,7 +129,10 @@
           <article class="feature-card">
             <span class="num" aria-hidden="true">03</span>
             <h3>企业策略</h3>
-            <p>强制 SSO、实例规格基线、镜像白名单、空闲与定时启停，全局策略一处配置。</p>
+            <!-- D5 话术核查：原表述"空闲与定时启停"含自动休眠类承诺，该链路（空闲超时/定时自动启停的执行器）尚未实现，
+                 对外一律不作"自动休眠/按需启停降本"承诺；改为已实现的口径——管理员可对实例执行启停管控并全局下发策略。
+                 待自动启停执行链路落地并验证后，再评估是否恢复该表述。 -->
+            <p>强制 SSO、实例规格基线、镜像白名单、实例启停管控，全局策略一处配置。</p>
           </article>
           <article class="feature-card">
             <span class="num" aria-hidden="true">04</span>
@@ -209,6 +224,127 @@
       </div>
     </section>
 
+    <!-- 安全与合规：六基线卡（素材提炼自交付包《部署指南》§8 安全基线与 §1.4 出网约束，不夸大、不宣称未取得的认证） -->
+    <section id="security" class="section section-pale">
+      <div class="container">
+        <h2>安全与合规</h2>
+        <p class="section-lead">隔离、审计、密钥与出网边界落在架构与交付基线上，逐条对应交付包《部署指南》的安全基线章节。</p>
+        <div class="pillars">
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/><path d="M13 7h4M7 17h4" stroke-dasharray="2 2.4"/></svg></span>
+            <h3>架构级数据隔离</h3>
+            <p>每员工独立实例（StatefulSet）与专属存储卷（PVC）；实例流量锁定在集群边界内，实例 Pod 不挂载集群管理凭据。</p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16M4 10h10M4 15h13M4 20h7"/><circle cx="18.5" cy="17.5" r="2.5"/><path d="M18.5 15v1.2M18.5 18.8V20"/></svg></span>
+            <h3>审计留痕</h3>
+            <p>管理面操作全量审计（控制台可查），运行时网关对写操作逐条审计上报；留存与归档策略按企业合规要求配置。</p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 9h4M7 13h7"/><circle cx="16.5" cy="15" r="1.8"/></svg></span>
+            <h3>OIDC / SSO</h3>
+            <p>标准 OIDC 对接企业自有 IdP，角色自动映射；可强制 SSO 登录，员工不另设平台密码。</p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1.6"/></svg></span>
+            <h3>密钥管理</h3>
+            <p>凭据全部以 Kubernetes Secret 注入；签名密钥与加密根纳入【密钥】清单，按企业密管流程离线备份，不在代码与工单中落值。</p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3l8 3.5v5c0 4.5-3.2 8.2-8 9.5-4.8-1.3-8-5-8-9.5v-5L12 3z"/><path d="M8.8 12l2.2 2.2 4.2-4.4"/></svg></span>
+            <h3>信创适配</h3>
+            <p>平台组件与实例镜像提供 Linux ARM64（鲲鹏 / 飞腾）构建，桌面端支持麒麟 / 统信（arm64 deb / rpm）；支持人大金仓 KingbaseES（PG 兼容模式，交付前按目标版本完成验收）。</p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3.5 9.5h17M3.5 14.5h17M12 3c2.6 2.4 4 5.6 4 9s-1.4 6.6-4 9c-2.6-2.4-4-5.6-4-9s1.4-6.6 4-9z"/></svg></span>
+            <h3>私有化出网约束</h3>
+            <p>平台组件除授权激活与更新检查两条可控外联外，无遥测、无数据上报；实例模型推理只发往企业自行配置的模型渠道；支持纯内网形态（自建授权服务 + 私有更新通道 + 镜像全量入仓）。</p>
+          </div>
+        </div>
+        <p class="conclusion-band">数据留在企业自己的集群：隔离、审计与密钥管理是交付基线，不是宣传语</p>
+        <!-- 合规留白（诚实口径）：等保 / ISO 等认证尚未取得，不得写"已认证"；只表述"支持满足…要求的设计"。取得认证或完成测评后再补充本段。 -->
+        <p class="note" id="legal">等保、ISO 27001 等第三方认证：尚未取得，本页不作"已认证"表述；平台安全设计支持企业按等保等要求开展自有测评与申报，交付基线明细见交付包《部署指南》安全基线章节。法务文档（隐私政策 / 服务条款 / EULA / DPA）草案整理中，正式版发布前如需获取，请致函商务邮箱。</p>
+      </div>
+    </section>
+
+    <!-- 文档：交付包文档体系入口（公开渠道 = GitHub Releases；完整文档随交付包发布） -->
+    <section id="docs" class="section">
+      <div class="container">
+        <h2>文档</h2>
+        <p class="section-lead">评估、部署与运维全链路文档随私有化交付包发布；公开渠道提供安装包与校验清单。</p>
+        <div class="feature-grid">
+          <!-- 文档定稿（2026-11-12）：部署指南=交付包 deployment-guide.md（运维手册为其 §7 与 §18-§20 扩缩容/审计归档/巡检清单章节）；
+               管理员手册=docs/manuals/admin-guide.md；员工使用指南=docs/manuals/employee-guide.md。名称与实际包内文档一致。 -->
+          <article class="feature-card">
+            <h3>部署指南</h3>
+            <p>从集群前提、镜像清单、OIDC / SSO 登记到授权激活与上线验收清单的端到端部署文档。</p>
+          </article>
+          <article class="feature-card">
+            <h3>运维手册</h3>
+            <p>备份恢复、证书与密钥轮换、版本升级、组件扩缩容、审计归档与日/周/月巡检清单——随《部署指南》以运维章节交付。</p>
+          </article>
+          <article class="feature-card">
+            <h3>管理员手册</h3>
+            <p>登录与内置角色、成员与强制下线、实例治理、SSO 与策略配置、授权激活、审计查询与用量报表的平台日常管理指引。</p>
+          </article>
+          <article class="feature-card">
+            <h3>员工使用指南</h3>
+            <p>给员工的入门手册：第一次 SSO 登录、日常对话与文件、审批确认、断网会怎样、数据存在哪里。</p>
+          </article>
+        </div>
+        <p class="note">以上手册随私有化交付包提供，评估阶段由商务提供完整文档；桌面端安装与更新说明见下方<a href="#download">下载区</a>。公开渠道：<a href="https://github.com/rising-biz/workpaw-releases/releases/latest">GitHub Releases（安装包 + SHA-256 校验清单）</a>。</p>
+      </div>
+    </section>
+
+    <!-- 客户案例与试用：诚实占位（案例整理中，不虚构案例）+ 试用申请邮件入口 -->
+    <section id="cases" class="section section-pale">
+      <div class="container">
+        <h2>客户案例与试用</h2>
+        <p class="section-lead">首批私有化客户案例整理中；在案例发布前，欢迎直接通过试用评估验证平台。</p>
+        <div class="pillars">
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/></svg></span>
+            <h3>试用评估</h3>
+            <p>致函商务邮箱，说明企业名称、规模与目标场景，我们会在 1 个工作日内回复，安排产品演示与私有化试用环境评估；试用环境形态与范围以双方确认为准。</p>
+            <p><a class="btn btn-primary btn-small" href="mailto:sales@workpaw.automan.fun?subject=WorkPaw%20%E8%AF%95%E7%94%A8%E7%94%B3%E8%AF%B7">申请试用</a></p>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.4l-5.2 2.8 1-5.9L3.5 9.2l5.9-.8L12 3z"/></svg></span>
+            <h3>标杆案例 · 案例整理中</h3>
+            <p>首批客户案例正在整理与授权确认中，正式发布前本页不展示案例内容；如需了解已部署场景，请联系商务获取脱敏介绍。</p>
+          </div>
+        </div>
+        <!-- TODO(CASES): 案例占位卡。上线前替换为真实案例：客户名称 / 行业 / 规模 / 场景须取得客户书面授权后方可展示，不得虚构案例。 -->
+      </div>
+    </section>
+
+    <!-- 联系我们：商务邮箱占位 + 响应承诺（联系邮箱域名为示例，交付前替换） -->
+    <section id="contact" class="section">
+      <div class="container">
+        <h2>联系我们</h2>
+        <p class="section-lead">私有化部署评估、报价与许可、试用安排，请致函商务邮箱。</p>
+        <div class="pillars">
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 7l8.5 6 8.5-6"/></svg></span>
+            <h3>商务咨询</h3>
+            <!-- TODO(DOMAIN): sales@workpaw.automan.fun 为示例域名下的占位邮箱，交付前替换为正式商务域名邮箱；替换点共四处（本节 / 案例与试用 / 页脚 / 法务草案） -->
+            <p><a class="mail-link" href="mailto:sales@workpaw.automan.fun">sales@workpaw.automan.fun</a></p>
+            <p>响应承诺：收到咨询后 1 个工作日内回复。</p>
+            <ul class="role-chips" aria-label="常见咨询主题">
+              <li><strong>部署评估</strong> · 集群与网络形态</li>
+              <li><strong>报价与许可</strong> · 席位与订阅</li>
+              <li><strong>试用安排</strong> · 演示与 POC</li>
+            </ul>
+          </div>
+          <div class="pillar">
+            <span class="pillar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h5M8 17h3"/></svg></span>
+            <h3>交付与支持</h3>
+            <p>交付包（Helm chart、镜像清单、五平台安装包与完整文档）随商务流程提供；上线后的支持渠道与响应级别以订阅合同约定为准。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 下载区：机制一字不动，只重描视觉 -->
     <section id="download" class="section section-download">
       <div class="container">
@@ -270,7 +406,21 @@
   <footer>
     <div class="container footer-inner">
       <span>© 2026 WorkPaw</span>
-      <a href="https://github.com/rising-biz/workpaw-releases/releases/latest">备用通道 · GitHub Releases</a>
+      <!-- TODO(主体): 公司主体全称确定后，将上方版权行改为「© 2026 <公司主体全称>」并在本页法务文档中落款 -->
+      <nav class="footer-nav" aria-label="页脚导航">
+        <a href="#docs">文档</a>
+        <a href="#security">安全与合规</a>
+        <!-- TODO(DOMAIN): 商务邮箱为示例域名占位，上线前替换为正式域名邮箱（与本页"联系我们"小节一致） -->
+        <a href="mailto:sales@workpaw.automan.fun">sales@workpaw.automan.fun</a>
+        <!-- TODO(MARKET): 智能体市场站点域名尚未确定，此链接为 https 占位，上线前替换为市场站点正式地址（与 workpaw-market 部署的 VITE_PUBLIC_SITE_ORIGIN 保持一致）；替换前该链接不可解析，属预期内的占位状态 -->
+        <a href="https://market.example.com" rel="noopener">智能体市场</a>
+        <!-- 法务文档两步走：当前为站内锚点占位；法务草案定稿并转 Hugo 多页上线后，改为对应静态页链接（见 official-site/legal-drafts/） -->
+        <a href="#legal">法务文档（即将上线）</a>
+        <a href="https://github.com/rising-biz/workpaw-releases/releases/latest">备用通道 · GitHub Releases</a>
+      </nav>
+      <span class="footer-icp">
+        <!-- TODO(ICP): 备案号办理后填入，形如 <a href="https://beian.miit.gov.cn/" rel="noopener">X ICP 备 00000000 号-X</a>；未办理前保持本注释，不得展示占位备案号 -->
+      </span>
     </div>
   </footer>
 

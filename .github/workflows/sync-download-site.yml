@@ -5,10 +5,29 @@
 # desktop-releases Environment（COS_ACCESS_KEY_ID / COS_SECRET_ACCESS_KEY），
 # 与其他发布秘密同一存放边界；只写 COS 的 download/、history/ 前缀与
 # 页面对象，绝不触碰 Keygate 更新链路对象。
+#
+# 冻结守卫（P1-8）：本工作流已被 official-site 官网取代并冻结，但最后一步
+# 仍会把前代下载站页面 copy 到桶根——桶根唯一合法的常规写者应为
+# deploy-official-site。因此新增 pre-step：先只读回读桶根 index.html 前
+# 2KB，按官网标记（OFFICIAL_SITE_MARKER，与 deploy-official-site.yml 部署后
+# 回读校验的是同一特征串，双端契约）判定桶根归属，两种状态都默认中止，
+# 仅 workflow_dispatch input force=true 可显式放行：
+#   - 桶根含官网标记 → 本次运行将覆盖官网入口（P1-8 风险本体）→ 中止；
+#   - 桶根不含官网标记 → 桶根状态异常（官网未部署/已被覆盖/指错桶）→
+#     同样中止，防止把旧站写进一个不属于官网当前状态的桶。
+# force=true 即「解冻逃生口」：确认要覆盖/在异常桶上继续时显式传入，
+# 运行日志会留下显式确认痕迹。解冻或删除本工作流前，须先评估对官网
+# 桶根页面对象的覆盖影响，并同步更新 official-site/README.md「守护说明」。
 name: sync-download-site
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: '显式确认绕过冻结守卫（将覆盖官网桶根页面对象）'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: read
@@ -17,16 +36,73 @@ concurrency:
   group: sync-download-site
   cancel-in-progress: false
 
+env:
+  # rclone 钉版直装，与 deploy-official-site.yml 同一版本、同一校验法（P1-7）
+  RCLONE_VERSION: "1.76.0"
+  # 官网桶根标记：与 deploy-official-site.yml 的 OFFICIAL_SITE_MARKER 同一
+  # 常量（双端契约，一端改动必须同步另一端）
+  OFFICIAL_SITE_MARKER: '<meta name="theme-color" content="#0B1F14">'
+
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: desktop-releases
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install rclone
-        run: sudo apt-get update && sudo apt-get install -y rclone
+      - name: Install rclone (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64.zip" "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip"
+          curl -fsSL --retry 3 -o "/tmp/rclone-v${RCLONE_VERSION}-SHA256SUMS" "https://downloads.rclone.org/v${RCLONE_VERSION}/SHA256SUMS"
+          grep "rclone-v${RCLONE_VERSION}-linux-amd64.zip" "/tmp/rclone-v${RCLONE_VERSION}-SHA256SUMS" | (cd /tmp && sha256sum -c -)
+          unzip -o -q "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64.zip" -d /tmp/rclone-dist
+          install -m 0755 "/tmp/rclone-dist/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone
+          rclone version | head -1
+
+      # 冻结守卫：只读（rclone cat）回读桶根页面前 2KB 判归属，不写任何对象。
+      # 最小权限注记：此步仅需要本桶只读；理想形态是给 Environment 配一对
+      # 仅授权本桶只读的子账号密钥（如 COS_READONLY_ACCESS_KEY_ID）供守卫步
+      # 使用，当前复用既有可写凭据（见交付包外部凭据清单）。
+      - name: 'Guard: frozen workflow needs force=true to touch bucket root'
+        env:
+          FORCE: ${{ inputs.force }}
+          RCLONE_CONFIG_COS_TYPE: s3
+          RCLONE_CONFIG_COS_PROVIDER: TencentCOS
+          RCLONE_CONFIG_COS_ACCESS_KEY_ID: ${{ secrets.COS_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_COS_SECRET_ACCESS_KEY: ${{ secrets.COS_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_COS_ENDPOINT: https://cos.ap-guangzhou.myqcloud.com
+          COS_REMOTE: cos:workpaw-1253566621
+        run: |
+          set -euo pipefail
+          if [[ "$FORCE" == "true" ]]; then
+            echo "⚠ force=true：操作员已显式确认，跳过冻结守卫并继续。" >&2
+            echo "  本次运行将把前代下载站页面写入桶根（含 index.html）；请把本次覆盖记入解冻评估记录。" >&2
+            exit 0
+          fi
+          echo "==> 冻结守卫：只读回读 $COS_REMOTE/index.html 前 2KB，判定桶根归属…"
+          if ! rclone cat "$COS_REMOTE/index.html" > bucket-root-index.html; then
+            rm -f bucket-root-index.html
+            echo "错误：无法只读回读 $COS_REMOTE/index.html（桶根无页面对象或凭据不可读）。" >&2
+            echo "      守卫无法确认官网入口在位：中止，本次运行未写入任何对象。" >&2
+            echo "      补救：确认桶根状态后，如仍要在该桶继续，须以 force=true 显式重新触发。" >&2
+            exit 1
+          fi
+          page_head="$(head -c 2048 bucket-root-index.html)"
+          rm -f bucket-root-index.html
+          if printf '%s' "$page_head" | grep -F -q -- "$OFFICIAL_SITE_MARKER"; then
+            echo "错误：桶根 index.html 含官网标记——桶根当前是 deploy-official-site 的官网页面。" >&2
+            echo "      本工作流已冻结，继续运行会以旧下载站页面覆盖官网入口（P1-8 风险本体）。" >&2
+            echo "      已中止，本次运行未写入任何对象。日常发版请使用 deploy-official-site。" >&2
+            echo "      逃生口：确需用旧下载站覆盖官网入口时，以 force=true 显式重新触发并留痕。" >&2
+            exit 1
+          fi
+          echo "错误：桶根 index.html 不含官网标记（$OFFICIAL_SITE_MARKER）。" >&2
+          echo "      桶根状态异常：官网未部署、已被覆盖，或 COS_REMOTE 指到了别的桶。" >&2
+          echo "      为避免把旧站写进非预期的桶状态，已中止，本次运行未写入任何对象。" >&2
+          echo "      补救：先用 deploy-official-site 部署官网；或人工核实桶根后以 force=true 显式重新触发。" >&2
+          exit 1
 
       - name: Sync download site to COS
         env:

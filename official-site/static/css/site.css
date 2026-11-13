@@ -225,6 +225,7 @@ main section h2 {
   color: var(--body);
 }
 #product, #features, #download { scroll-margin-top: 76px; }
+#security, #docs, #cases, #contact { scroll-margin-top: 76px; }
 #product { position: relative; overflow: hidden; }
 
 /* 产品定位：左定位句 + 右 2×2 四支柱 */
@@ -538,6 +539,29 @@ main section h2 {
   font-size: 0.8rem;
   word-break: break-all;
 }
+/* 正文说明行内的链接（安全与合规/文档小节的 .note）：沿用 .dl-footnotes a 的绿色下划线语言 */
+.note a {
+  color: var(--green-dark);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--mint-line);
+  text-underline-offset: 3px;
+}
+.note a:hover { color: var(--green-deep); text-decoration-color: var(--green-deep); }
+
+/* 商务邮箱链接（联系我们小节）：与 .file-name 同一视觉语言（品牌绿 + 细下划线） */
+.mail-link {
+  display: inline-block;
+  margin: 2px 0 6px;
+  color: var(--green-dark);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--mint-line);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  word-break: break-all;
+}
+.mail-link:hover { color: var(--green-deep); text-decoration-color: var(--green-deep); }
 .dl-footnotes {
   margin-top: 32px;
   padding-top: 20px;
@@ -604,6 +628,14 @@ footer {
   text-underline-offset: 3px;
 }
 .footer-inner a:hover { color: #fff; }
+/* 页脚链接组（文档/安全合规/商务邮箱/市场/法务）：横向多链接时换行不挤压版权行 */
+.footer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 22px;
+}
+.footer-icp { font-size: 0.82rem; }
 
 /* 克制动线：全部动画包在 no-preference 内；:active 下沉与 hover 配色即时生效（无动画依赖） */
 @media (prefers-reduced-motion: no-preference) {
@@ -633,6 +665,8 @@ footer {
   .paw-hero-bl, .paw-product { display: none; }
   .positioning { font-size: 1.35rem; }
   .platform { padding: 20px 18px 12px; }
+  /* 导航扩到 7 项后，560–700px 视口放不下：允许顶栏换行，≤560px 仍整体隐藏导航 */
+  .topbar-inner { flex-wrap: wrap; row-gap: 2px; padding-top: 6px; padding-bottom: 6px; }
 }
 @media (max-width: 560px) {
   .topbar nav { display: none; }  /* 单页锚点让位于品牌与下载按钮 */
