@@ -35,12 +35,12 @@ on:
       qwenpaw_source:
         description: 'mirror-qwenpaw: upstream image reference (repo:tag)'
         required: false
-        default: 'agentscope/qwenpaw:v2.2.2'
+        default: 'agentscope/qwenpaw:v2.3.0'
         type: string
       qwenpaw_dest_tag:
         description: 'mirror-qwenpaw: tag to publish under the namespace'
         required: false
-        default: 'v2.2.2'
+        default: 'v2.3.0'
         type: string
       repos:
         description: 'publish-repos / delete-tags / delete-repo: repository names, comma separated, namespace omitted (Hub personal namespaces do not allow slashes in repo names)'
